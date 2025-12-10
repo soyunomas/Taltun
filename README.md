@@ -37,7 +37,7 @@
 
 ```bash
 # 1. Clonar el repositorio
-git clone https://github.com/tu-usuario/taltun.git
+git clone https://github.com/soyunomas/taltun.git
 cd taltun
 
 # 2. Compilar binario optimizado (Strip debug symbols + O3 equivalent)

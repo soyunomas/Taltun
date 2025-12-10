@@ -1,9 +1,3 @@
-Aquí tienes un **README.md** profesional, estructurado al estilo de proyectos de infraestructura modernos como Tailscale o WireGuard. Está diseñado para destacar tanto la facilidad de uso como la profundidad técnica del proyecto.
-
-Copia el siguiente bloque en tu archivo `README.md`.
-
----
-
 # Taltun ⚡
 
 ![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go)
@@ -11,9 +5,7 @@ Copia el siguiente bloque en tu archivo `README.md`.
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 ![Status](https://img.shields.io/badge/Status-Stable%20%28v0.7.0%29-blue)
 
-**Taltun** es una VPN de alto rendimiento, *Zero-Allocation* y segura, escrita en Go puro. Diseñada para saturar enlaces Gigabit en hardware modesto mediante el uso intensivo de **Vectorized I/O**, **SIMD Cryptography** y **Kernel Bypass techniques** (userspace networking).
-
-A diferencia de las VPNs tradicionales que sufren de latencia por cambios de contexto y asignación de memoria dinámica, Taltun implementa un dataplane optimizado que mueve paquetes directamente entre el Kernel y la memoria de la aplicación con un overhead mínimo.
+**Taltun** es una VPN de alto rendimiento, Zero-Allocation y segura, escrita en Go puro. Optimizada para aprovechar la totalidad del ancho de banda en enlaces Gigabit sobre hardware modesto, mediante el uso intensivo de Vectorized I/O, SIMD Cryptography y Kernel Bypass techniques (userspace networking).
 
 ---
 

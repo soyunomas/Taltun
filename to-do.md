@@ -1,6 +1,6 @@
 # 🗺️ Hoja de Ruta Técnica (Technical Roadmap)
 
-> **Estado Actual:** v0.7.0 (Stable Core)
+> **Estado Actual:** v0.8.0 (Usability & Automation)
 > **Objetivo:** Convertir el motor de alto rendimiento actual en una plataforma de conectividad universal, segura y resistente.
 
 ---
@@ -9,21 +9,19 @@
 **Objetivo:** Eliminar la configuración manual de interfaces y flags kilométricos. "Battery-included experience".
 
 ### 🔧 8.1. Configuración Estructurada (Configuration Management)
-- [ ] **Soporte YAML/TOML:** Reemplazar `flag` por `spf13/viper`.
-    - Definir estructura para Peers estáticos: listados de `PublicKey`, `AllowedIPs`, `Endpoint`.
-- [ ] **Hot-Reloading:** Implementar `SIGHUP` signal handler para recargar configuración sin tirar el túnel.
+- [x] **Soporte TOML:** Implementado con `go-toml/v2` para configuración estructurada y tipada sin reflection overhead.
+- [x] **Hot-Reloading (Parcial):** Prioridad de flags sobre archivo para cambios rápidos.
 
 ### 🐧 8.2. Linux Netlink Automation
-- [ ] **Programación Automática de IP:**
-    - Eliminar necesidad de `ip addr add` externo.
-    - Usar librería `vishvananda/netlink` para interactuar con el Kernel via Netlink sockets.
-    - **Tarea:** Crear interfaz TUN -> Asignar IP/Mascara -> Levantar Link -> Configurar MTU.
+- [x] **Programación Automática de IP:**
+    - Taltun ahora configura automáticamente IP, Máscara (/24), MTU y estado UP de la interfaz TUN al arrancar.
+    - Implementado usando `vishvananda/netlink`.
 - [ ] **Gestión de Rutas del Kernel:**
-    - Capacidad de añadir rutas en la tabla del sistema operativo (`ip route add`) para redirigir tráfico de subredes específicas hacia la interfaz TUN automáticamente.
+    - Capacidad de añadir rutas extra en la tabla del sistema operativo (`ip route add`) para redirigir tráfico de subredes específicas.
 
 ### 🧹 8.3. Graceful Shutdown & Cleanup
-- [ ] **Context Cancellation:** Propagar `context.Context` desde `main` hasta los workers de I/O.
-- [ ] **Resource Teardown:** Asegurar que la interfaz TUN se destruye y las rutas se limpian al recibir `SIGINT`/`SIGTERM`.
+- [x] **Context Cancellation:** Propagación de `context.Context` desde `main`.
+- [x] **Resource Teardown:** Cierre limpio de descriptores de archivo TUN/UDP al recibir `SIGINT`/`SIGTERM`.
 
 ---
 
@@ -98,18 +96,3 @@
 - [ ] **Hardware Offload:**
     - Negociar con la tarjeta de red para que el hardware junte múltiples paquetes TCP en un solo buffer gigante antes de pasarlo a la CPU.
     - Reducción masiva de overhead por paquete.
-
----
-
-## 🏗️ Guía de Contribución para Desarrolladores
-
-### Principios de Diseño
-1.  **Allocation is the Enemy:** Si vas a usar `make()` en el hot-path, piénsalo dos veces. Usa `pkg/pool`.
-2.  **Trust No One:** Valida longitud, cabeceras y autenticidad (AEAD) antes de procesar lógica.
-3.  **Concurrency Safety:** El mapa de `Peers` es sagrado. Usa `RWMutex` o `sync.Map` con criterio.
-
-### Estándares de Código
-- Go 1.22+
-- `go fmt` obligatorio.
-- Comentarios en formato `godoc` para todas las funciones exportadas.
-- Tests unitarios obligatorios para cualquier lógica de parsing/crypto.

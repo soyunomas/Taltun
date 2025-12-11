@@ -1,28 +1,34 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net"
 	"net/http"
-	_ "net/http/pprof" // IMPORT MÁGICO
-	"strings"
-	
+	_ "net/http/pprof"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
 	"github.com/Soyunomas/taltun/internal/config"
 	"github.com/Soyunomas/taltun/internal/engine"
 )
 
 func main() {
-	peerFlag := flag.String("peer", "", "Definir peer estático: VIP,RemoteUDPAddr")
-	// Flag para profiling
-	pprofAddr := flag.String("pprof", "", "Habilitar pprof en address:port (ej: localhost:6060)")
-	
-	cfg, err := config.Load() // config.Load parsea los flags
+	pprofAddr := flag.String("pprof", "", "Habilitar pprof en address:port")
+
+	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("Error de configuración: %v", err)
+		log.Fatalf("❌ Error de configuración: %v", err)
 	}
 
-	// Iniciar servidor de profiling si se solicita
+	// 1. Setup Signal Handling (Graceful Shutdown)
+	// Creamos un contexto que se cancela al recibir SIGINT (Ctrl+C) o SIGTERM
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
 	if *pprofAddr != "" {
 		go func() {
 			log.Printf("🕵️ Profiling activo en http://%s/debug/pprof/", *pprofAddr)
@@ -30,46 +36,43 @@ func main() {
 		}()
 	}
 
-	// 2. Inicializar Engine
+	log.Printf("🔹 Iniciando Taltun (Mode: %s | VIP: %s | TUN: %s)", 
+		cfg.Mode, cfg.LocalVIP, cfg.TunName)
+
 	srv, err := engine.New(cfg)
 	if err != nil {
-		log.Fatalf("Error creando engine: %v", err)
+		log.Fatalf("❌ Error creando engine: %v", err)
 	}
 
-	// 3. Registrar Peers
-	if *peerFlag != "" {
-		parts := strings.Split(*peerFlag, ",")
-		vip := net.ParseIP(parts[0])
+	peersAdded := 0
+	for _, p := range cfg.Peers {
+		vip := net.ParseIP(p.VIP)
 		if vip == nil {
-			log.Fatalf("IP Virtual peer invalida: %s", parts[0])
+			log.Printf("⚠️ Peer VIP invalida ignorada: %s", p.VIP)
+			continue
 		}
 		
-		remote := ""
-		if len(parts) > 1 {
-			remote = parts[1]
+		if err := srv.AddPeer(vip, p.Endpoint); err != nil {
+			log.Printf("⚠️ Error añadiendo peer %s: %v", p.VIP, err)
+		} else {
+			peersAdded++
 		}
-		
-		if err := srv.AddPeer(vip, remote); err != nil {
-			log.Fatalf("Error añadiendo peer: %v", err)
-		}
-	} else {
-		// Modo compatibilidad
-		if cfg.Mode == "client" && cfg.RemoteAddr != "" {
-			log.Println("⚠️ No se especificó -peer, añadiendo servidor default 10.0.0.1")
-			srv.AddPeer(net.ParseIP("10.0.0.1"), cfg.RemoteAddr)
-		}
-		if cfg.Mode == "server" {
-			log.Println("⚠️ No se especificó -peer, permitiendo cliente dinámico 10.0.0.2")
-			srv.AddPeer(net.ParseIP("10.0.0.2"), "")
-		}
+	}
+
+	if peersAdded == 0 && cfg.Mode == "client" {
+		log.Println("⚠️ Advertencia: Cliente iniciado sin peers configurados.")
 	}
 
 	if err := srv.Initialize(); err != nil {
-		log.Fatalf("Error inicializando recursos: %v", err)
+		log.Fatalf("❌ Error inicializando recursos: %v", err)
 	}
 
-	// 4. Run
-	if err := srv.Run(); err != nil {
-		log.Fatalf("Engine se detuvo con error: %v", err)
+	// 2. Run with Context
+	// Bloquea hasta que ocurra un error fatal o el usuario pulse Ctrl+C
+	start := time.Now()
+	if err := srv.Run(ctx); err != nil {
+		log.Fatalf("❌ Engine falló: %v", err)
 	}
+
+	log.Printf("👋 Taltun detenido correctamente (Uptime: %s)", time.Since(start).Round(time.Second))
 }

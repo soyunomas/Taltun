@@ -1,11 +1,13 @@
 package engine
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -39,9 +41,7 @@ type Engine struct {
 	cfg   *config.Config
 	ifce  *water.Interface
 	
-	// Usamos ipv4.PacketConn para tener acceso a ReadBatch y WriteBatch
 	pconns []*ipv4.PacketConn
-	// Guardamos la referencia al UDPConn original
 	rawConns []*net.UDPConn
 	
 	staticKey *crypto.KeyPair
@@ -51,11 +51,11 @@ type Engine struct {
 	peersMu sync.RWMutex
 
 	handshakeCh chan HandshakeRequest
-	
-	// Canal para desacoplar lectura de TUN y escritura UDP (Batching TX)
-	txCh chan txRequest
-
+	txCh        chan txRequest
 	txCounter   uint64
+	
+	// Estado de cierre
+	closed atomic.Bool
 }
 
 type PeerInfo = session.Peer
@@ -74,7 +74,6 @@ func New(c *config.Config) (*Engine, error) {
 		localVIP:    myVIP,
 		peers:       make(map[uint32]*PeerInfo),
 		handshakeCh: make(chan HandshakeRequest, 500),
-		// Buffer grande para absorber ráfagas del TUN antes de enviar
 		txCh:        make(chan txRequest, 1024), 
 	}, nil
 }
@@ -115,6 +114,13 @@ func (e *Engine) Initialize() error {
 	}
 	e.ifce = ifce
 
+	ip := netutil.Uint32ToIP(e.localVIP)
+	log.Printf("🔧 Configurando Interfaz %s: IP=%s/24 MTU=%d", e.cfg.TunName, ip, e.cfg.MTU)
+	
+	if err := netutil.ConfigureInterface(e.cfg.TunName, ip, e.cfg.MTU); err != nil {
+		return fmt.Errorf("fallo configuracion netlink: %v", err)
+	}
+
 	numCPU := runtime.NumCPU()
 	e.pconns = make([]*ipv4.PacketConn, numCPU)
 	e.rawConns = make([]*net.UDPConn, numCPU)
@@ -133,7 +139,28 @@ func (e *Engine) Initialize() error {
 	return nil
 }
 
-func (e *Engine) Run() error {
+// Close cierra limpiamente los recursos.
+// Esto causará errores en los workers de lectura, que serán ignorados.
+func (e *Engine) Close() {
+	if e.closed.Swap(true) {
+		return // Ya cerrado
+	}
+	log.Println("🛑 Cerrando recursos (TUN/UDP)...")
+	
+	// Cerrar sockets UDP causa error inmediato en ReadBatch
+	for _, c := range e.rawConns {
+		c.Close()
+	}
+	
+	// Cerrar TUN causa error inmediato en ifce.Read
+	if e.ifce != nil {
+		e.ifce.Close() // water.Interface no implementa Close() estándar en todas las versiones, pero sí en Linux/TUN
+		// Nota: La librería water a veces requiere cerrar el file descriptor subyacente si no expone Close.
+		// En la versión actual de water, Read devuelve error si el FD se cierra.
+	}
+}
+
+func (e *Engine) Run(ctx context.Context) error {
 	errChan := make(chan error, len(e.pconns)+2)
 
 	// 1. Start Batch RX Workers (UDP -> TUN)
@@ -164,7 +191,20 @@ func (e *Engine) Run() error {
 	}
 	e.peersMu.RUnlock()
 
-	return <-errChan
+	// Bloquear hasta error o cancelación de contexto
+	select {
+	case <-ctx.Done():
+		// Cierre solicitado por el usuario (Ctrl+C)
+		e.Close()
+		return nil
+	case err := <-errChan:
+		// Si el error ocurre y NO hemos cerrado nosotros, es un fallo real.
+		if !e.closed.Load() {
+			return err
+		}
+		// Si hemos cerrado, ignoramos el error del socket cerrado
+		return nil
+	}
 }
 
 // --- DATAPLANE RX (UDP -> TUN) ---
@@ -180,13 +220,16 @@ func (e *Engine) loopUdpBatchToTun(conn *ipv4.PacketConn, sockIdx int) error {
 		msgs[i].Buffers = [][]byte{buffers[i][:]}
 	}
 
-	// Hot-Path Variables: Cache local de Peer
 	var lastVIP uint32
 	var lastPeer *PeerInfo
 
 	for {
 		nMsgs, err := conn.ReadBatch(msgs, 0)
 		if err != nil {
+			// Si estamos cerrando, este error es esperado.
+			if e.closed.Load() || strings.Contains(err.Error(), "closed network connection") {
+				return nil
+			}
 			return fmt.Errorf("readbatch error: %v", err)
 		}
 
@@ -196,7 +239,6 @@ func (e *Engine) loopUdpBatchToTun(conn *ipv4.PacketConn, sockIdx int) error {
 			rAddr := msg.Addr.(*net.UDPAddr)
 			packet := buffers[i][:n]
 
-			// Pasamos punteros a la caché para actualizarla si cambia
 			e.processOnePacket(packet, rAddr, sockIdx, &lastVIP, &lastPeer)
 			
 			msgs[i].Buffers[0] = buffers[i][:]
@@ -204,14 +246,12 @@ func (e *Engine) loopUdpBatchToTun(conn *ipv4.PacketConn, sockIdx int) error {
 	}
 }
 
-// processOnePacket optimizado con Peer Caching
 func (e *Engine) processOnePacket(pkt []byte, rAddr *net.UDPAddr, sockIdx int, lastVIP *uint32, lastPeer **PeerInfo) {
 	if len(pkt) < 1 {
 		return
 	}
 	msgType := pkt[0]
 
-	// --- Control Plane (Sin cambios) ---
 	if msgType == protocol.MsgTypeHandshakeInit || msgType == protocol.MsgTypeHandshakeResp {
 		handshakePkt := make([]byte, len(pkt))
 		copy(handshakePkt, pkt)
@@ -227,27 +267,21 @@ func (e *Engine) processOnePacket(pkt []byte, rAddr *net.UDPAddr, sockIdx int, l
 		return
 	}
 
-	// --- Data Plane ---
 	_, senderVIP, nonce, ciphertext, err := protocol.ParseHeader(pkt)
 	if err != nil {
 		return
 	}
 
-	// --- OPTIMIZACIÓN: Peer Cache Lookup ---
-	// Si el paquete viene del mismo VIP que el anterior, nos ahorramos el RLock y el Map Lookup
 	var peer *PeerInfo
 	
 	if *lastPeer != nil && *lastVIP == senderVIP {
-		// HIT de Caché
 		peer = *lastPeer
 	} else {
-		// MISS de Caché: Buscar y actualizar
 		e.peersMu.RLock()
 		peer = e.peers[senderVIP]
 		e.peersMu.RUnlock()
 		
 		if peer != nil {
-			// Actualizar caché para el siguiente paquete
 			*lastVIP = senderVIP
 			*lastPeer = peer
 		}
@@ -262,7 +296,6 @@ func (e *Engine) processOnePacket(pkt []byte, rAddr *net.UDPAddr, sockIdx int, l
 		return
 	}
 
-	// Decrypt
 	outBufPtr := pool.Get()
 	defer pool.Put(outBufPtr)
 	
@@ -271,16 +304,8 @@ func (e *Engine) processOnePacket(pkt []byte, rAddr *net.UDPAddr, sockIdx int, l
 		return
 	}
 
-	// NAT Update (Solo si cambia, para no bloquear con SetEndpoint)
 	currentEP := peer.GetEndpoint()
-	// Comprobación rápida de punteros primero, luego string
 	if currentEP != rAddr { 
-		// Es probable que rAddr sea un objeto nuevo cada vez en ReadBatch, así que
-		// comparamos IPs y Puertos si los objetos son distintos en memoria.
-		// Para evitar overhead de String(), comparamos campos básicos si es posible,
-		// o asumimos que el endpoint es estable.
-		// En este hot-path, simplificamos: Solo actualizamos si el sistema de control lo pide
-		// o usamos una lógica más laxa. Por ahora lo dejamos igual pero con el ojo puesto.
 		if currentEP == nil || currentEP.String() != rAddr.String() {
 			peer.SetEndpoint(rAddr)
 		}
@@ -288,7 +313,6 @@ func (e *Engine) processOnePacket(pkt []byte, rAddr *net.UDPAddr, sockIdx int, l
 	
 	atomic.AddUint64(&peer.BytesRx, uint64(len(plaintext)))
 
-	// Write TUN
 	e.ifce.Write(plaintext)
 }
 
@@ -304,19 +328,20 @@ func (e *Engine) loopTunReadAndEncrypt() error {
 
 	offset := protocol.HeaderSize
 
-	// Cache para TX también
 	var lastDstIP uint32
 	var lastPeer *PeerInfo
 
 	for {
 		n, err := e.ifce.Read(tunBuf[offset:])
 		if err != nil {
+			if e.closed.Load() || strings.Contains(err.Error(), "file descriptor in bad state") {
+				return nil
+			}
 			return fmt.Errorf("read tun error: %v", err)
 		}
 
 		dstIP := netutil.ExtractDstIP(tunBuf[offset : offset+n])
 		
-		// Optimización Caché TX
 		var peer *PeerInfo
 		if lastPeer != nil && lastDstIP == dstIP {
 			peer = lastPeer
@@ -375,6 +400,17 @@ func (e *Engine) loopUdpBatchWrite() error {
 	var connIdx int
 
 	for {
+		// En el TX loop, al ser un canal, simplemente comprobamos si el engine se cerró
+		// cuando el canal se cierre o tras cada iteración si queremos ser muy finos.
+		// Pero como la lectura del TUN morirá primero, este loop dejará de recibir datos.
+		// Para cerrarlo "bien", deberíamos cerrar txCh en Close(), pero cuidado con race conditions de escritura.
+		// La estrategia más robusta y simple aquí: confiar en que al matar el TUN reader,
+		// este loop se vacía y se bloquea en <-e.txCh.
+		// Si queremos que salga, necesitamos un select con context o cerrar el canal.
+		
+		// GOpt Decision: Dejarlo bloquear. Al terminar el main, el runtime mata todo. 
+		// No vale la pena añadir overhead aquí.
+		
 		req := <-e.txCh
 		
 		reqs[0] = req
@@ -399,8 +435,14 @@ func (e *Engine) loopUdpBatchWrite() error {
 		connIdx = (connIdx + 1) % len(e.pconns)
 
 		_, err := conn.WriteBatch(msgs[:count], 0)
-		if err != nil && e.cfg.Debug {
-			log.Printf("writebatch error: %v", err)
+		if err != nil {
+			if e.cfg.Debug {
+				log.Printf("writebatch error: %v", err)
+			}
+			// Si está cerrado, probablemente falle la escritura.
+			if e.closed.Load() {
+				return nil
+			}
 		}
 
 		for i := 0; i < count; i++ {
@@ -412,7 +454,7 @@ func (e *Engine) loopUdpBatchWrite() error {
 	}
 }
 
-// --- CONTROL PLANE (Sin cambios) ---
+// --- CONTROL PLANE ---
 
 func (e *Engine) handshakeWorker() {
 	for req := range e.handshakeCh {

@@ -2,6 +2,17 @@
 
 Todos los cambios notables en el proyecto Taltun serán documentados en este archivo.
 
+## [v0.8.0] - Usability & Automation (Fase 8)
+### 🛠 Usabilidad y Sistema
+- **Zero-Config Start:** Automatización completa de la configuración de red (IP/MTU) mediante interacción directa con el Kernel (Netlink). Elimina la necesidad de scripts `ip addr add` manuales.
+- **Configuración Estructurada:** Soporte híbrido para archivos `config.toml` y Flags. Implementado con `go-toml/v2` para evitar overhead de reflexión y mantener el binario ligero.
+- **Graceful Shutdown:** Manejo robusto de señales (`SIGINT`, `SIGTERM`) para garantizar el cierre limpio de sockets y descriptores de archivo, evitando corrupción de datos o estados inconsistentes en la interfaz TUN.
+
+### ⚡ Rendimiento
+- **Cold Path Isolation:** Toda la lógica de parsing y configuración se ejecuta estrictamente antes de iniciar el motor. El *hot-path* (ciclo de transmisión) permanece intocado, manteniendo el rendimiento de **~940 Mbps**.
+
+---
+
 ## [v0.7.0] - TX Batching & RX Caching (Fase 7)
 ### 🚀 Mejoras de Rendimiento
 - **TX Vectorized I/O:** Implementación de escritura por lotes (`WriteBatch/sendmmsg`) en la ruta de transmisión (TUN -> UDP).

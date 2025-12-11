@@ -172,4 +172,4 @@ El core de alto rendimiento está completo (v0.7.0). Los siguientes pasos se cen
 Este proyecto está bajo la Licencia **MIT**. Eres libre de usarlo, modificarlo y distribuirlo.
 
 ---
-*Built with ❤️ and excessive amounts of coffee by [Soyunomas].*
+

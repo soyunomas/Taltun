@@ -22,6 +22,9 @@ type Config struct {
 	Debug      bool
 	LocalVIP   net.IP
 	
+	// Rutas adicionales a inyectar en el Kernel
+	Routes []string
+
 	// Lista de peers pre-procesada para el arranque
 	Peers []PeerConfig
 }
@@ -33,23 +36,23 @@ type PeerConfig struct {
 }
 
 // fileConfig es el mapeo intermedio para TOML.
-// Usamos punteros para distinguir entre "no definido" y "valor zero".
 type fileConfig struct {
 	Interface struct {
-		Mode       *string `toml:"mode"`
-		LocalAddr  *string `toml:"local_addr"`
-		TunName    *string `toml:"tun_name"`
-		PrivateKey *string `toml:"private_key"`
-		VIP        *string `toml:"vip"`
-		MTU        *int    `toml:"mtu"`
-		Debug      *bool   `toml:"debug"`
+		Mode       *string   `toml:"mode"`
+		LocalAddr  *string   `toml:"local_addr"`
+		TunName    *string   `toml:"tun_name"`
+		PrivateKey *string   `toml:"private_key"`
+		VIP        *string   `toml:"vip"`
+		MTU        *int      `toml:"mtu"`
+		Debug      *bool     `toml:"debug"`
+		Routes     []string  `toml:"routes"` // <--- NUEVO
 	} `toml:"interface"`
 
 	Peers []PeerConfig `toml:"peers"`
 }
 
 func Load() (*Config, error) {
-	// 1. Definición de Flags (Prioridad Máxima y Legacy Support)
+	// 1. Definición de Flags
 	configPath := flag.String("config", "config.toml", "Ruta al archivo de configuración")
 	
 	fMode := flag.String("mode", "", "Override: client | server")
@@ -60,14 +63,13 @@ func Load() (*Config, error) {
 	fMTU := flag.Int("mtu", 0, "Override: MTU")
 	fDebug := flag.Bool("debug", false, "Override: Debug logs")
 	
-	// Legacy Flag: permite compatibilidad con scripts existentes
 	fPeer := flag.String("peer", "", "Legacy: VIP,RemoteUDPAddr")
 
 	if !flag.Parsed() {
 		flag.Parse()
 	}
 
-	// 2. Valores por Defecto (Hardcoded defaults)
+	// 2. Valores por Defecto
 	cfg := &Config{
 		Mode:      "client",
 		LocalAddr: "0.0.0.0:9000",
@@ -76,7 +78,7 @@ func Load() (*Config, error) {
 		Debug:     false,
 	}
 
-	// 3. Carga de Archivo (Si existe o se especificó explícitamente)
+	// 3. Carga de Archivo
 	var fc fileConfig
 	configFileUsed := false
 	
@@ -104,6 +106,7 @@ func Load() (*Config, error) {
 		if fc.Interface.Debug != nil { cfg.Debug = *fc.Interface.Debug }
 		if fc.Interface.PrivateKey != nil { fileKey = *fc.Interface.PrivateKey }
 		if fc.Interface.VIP != nil { fileVIP = *fc.Interface.VIP }
+		if fc.Interface.Routes != nil { cfg.Routes = fc.Interface.Routes } // <--- NUEVO
 		
 		cfg.Peers = fc.Peers
 	}
@@ -113,18 +116,15 @@ func Load() (*Config, error) {
 	if *fLocal != "" { cfg.LocalAddr = *fLocal }
 	if *fTun != "" { cfg.TunName = *fTun }
 	if *fMTU != 0 { cfg.MTU = *fMTU }
-	if *fDebug { cfg.Debug = true } // Flag bool solo activa
+	if *fDebug { cfg.Debug = true } 
 
-	// Resolución final de strings críticos
 	finalKey := fileKey
 	if *fKey != "" { finalKey = *fKey }
 
 	finalVIP := fileVIP
 	if *fVIP != "" { finalVIP = *fVIP }
 
-	// 6. Validaciones y Conversiones (Fail Fast)
-	
-	// Private Key
+	// 6. Validaciones
 	if finalKey == "" {
 		return nil, errors.New("private key es obligatoria (-key o config file)")
 	}
@@ -137,12 +137,10 @@ func Load() (*Config, error) {
 	}
 	cfg.SecretKey = keyBytes
 
-	// Local Address
 	if _, err := net.ResolveUDPAddr("udp", cfg.LocalAddr); err != nil {
 		return nil, fmt.Errorf("local addr invalida: %v", err)
 	}
 
-	// VIP
 	if finalVIP == "" {
 		return nil, errors.New("VIP es obligatoria (-vip o config file)")
 	}
@@ -152,10 +150,8 @@ func Load() (*Config, error) {
 	}
 	cfg.LocalVIP = vipIP.To4()
 
-	// 7. Procesar Legacy Peer Flag
 	if *fPeer != "" {
 		legacyPeer := parseLegacyPeer(*fPeer)
-		// Añadir al final de la lista (o crearla si no existe)
 		cfg.Peers = append(cfg.Peers, legacyPeer)
 	}
 

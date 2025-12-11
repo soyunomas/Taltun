@@ -19,7 +19,8 @@
 ### 🛠 Usabilidad y Automatización (Nuevo en v0.8)
 - **Zero-Config Start:** Asignación automática de IPs y configuración de MTU via Netlink. No requiere scripts externos.
 - **Structured Config:** Soporte nativo para archivos TOML limpios.
-- **Graceful Shutdown:** Cierre seguro de recursos al detener el servicio.
+- **Kernel Routing:** Inyección automática de rutas estáticas al levantar el túnel.
+- **Graceful Shutdown:** Cierre seguro de recursos y limpieza de rutas al detener el servicio.
 
 ### 🛡️ Seguridad Moderna
 - **Cifrado Robusto:** Todo el tráfico de datos usa **ChaCha20-Poly1305** con aceleración por hardware (AVX2).
@@ -66,10 +67,24 @@ vip = "10.0.0.1"            # IP VPN
 local_addr = "0.0.0.0:9000" # Puerto UDP escucha
 private_key = "TU_PRIVATE_KEY_HEX"
 
+# Rutas Estáticas (Kernel Injection)
+# Define qué subredes deben pasar por la VPN.
+# Si está vacío, solo pasa el tráfico a la IP del peer.
+routes = ["192.168.50.0/24"]
+
 # Lista de Peers (Clientes o Servidores)
 [[peers]]
 vip = "10.0.0.2"
 # endpoint = "x.x.x.x:9000" # Opcional si es dinámico
+```
+
+### 🛣️ Caso Especial: Full Tunneling (Todo por la VPN)
+
+Si quieres redirigir todo tu tráfico de internet por la VPN pero **sin perder el acceso a tu red local (SSH)**, usa esta configuración de rutas en lugar de `0.0.0.0/0`:
+
+```toml
+# Inyecta dos rutas /1 que cubren todo el espectro IPv4 pero respetan las rutas locales más específicas.
+routes = ["0.0.0.0/1", "128.0.0.0/1"]
 ```
 
 ---
@@ -120,6 +135,17 @@ Desde el cliente:
 ping 10.0.0.1
 ```
 *¡Deberías ver respuesta con latencia mínima!*
+
+---
+
+## ⚡ Performance Tuning
+
+Para evitar la fragmentación en enlaces WAN (especialmente en modo Full Tunnel), se recomienda configurar **TCP MSS Clamping** en el firewall:
+
+```bash
+# Ajusta el tamaño de segmento TCP al MTU del túnel automáticamente
+sudo iptables -t mangle -A FORWARD -o tun0 -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+```
 
 ---
 

@@ -121,6 +121,15 @@ func (e *Engine) Initialize() error {
 		return fmt.Errorf("fallo configuracion netlink: %v", err)
 	}
 
+	// --- NUEVO: Inyección de Rutas ---
+	if len(e.cfg.Routes) > 0 {
+		log.Printf("🛣️  Añadiendo rutas estáticas: %v", e.cfg.Routes)
+		if err := netutil.AddRoutes(e.cfg.TunName, e.cfg.Routes); err != nil {
+			return fmt.Errorf("fallo añadiendo rutas: %v", err)
+		}
+	}
+	// --------------------------------
+
 	numCPU := runtime.NumCPU()
 	e.pconns = make([]*ipv4.PacketConn, numCPU)
 	e.rawConns = make([]*net.UDPConn, numCPU)
@@ -139,31 +148,24 @@ func (e *Engine) Initialize() error {
 	return nil
 }
 
-// Close cierra limpiamente los recursos.
-// Esto causará errores en los workers de lectura, que serán ignorados.
 func (e *Engine) Close() {
 	if e.closed.Swap(true) {
 		return // Ya cerrado
 	}
 	log.Println("🛑 Cerrando recursos (TUN/UDP)...")
 	
-	// Cerrar sockets UDP causa error inmediato en ReadBatch
 	for _, c := range e.rawConns {
 		c.Close()
 	}
 	
-	// Cerrar TUN causa error inmediato en ifce.Read
 	if e.ifce != nil {
-		e.ifce.Close() // water.Interface no implementa Close() estándar en todas las versiones, pero sí en Linux/TUN
-		// Nota: La librería water a veces requiere cerrar el file descriptor subyacente si no expone Close.
-		// En la versión actual de water, Read devuelve error si el FD se cierra.
+		e.ifce.Close()
 	}
 }
 
 func (e *Engine) Run(ctx context.Context) error {
 	errChan := make(chan error, len(e.pconns)+2)
 
-	// 1. Start Batch RX Workers (UDP -> TUN)
 	for i, pc := range e.pconns {
 		idx := i
 		pconn := pc
@@ -172,17 +174,14 @@ func (e *Engine) Run(ctx context.Context) error {
 		}()
 	}
 
-	// 2. Start TX Split Pipeline (TUN -> UDP)
 	go func() { errChan <- e.loopTunReadAndEncrypt() }()
 	go func() { errChan <- e.loopUdpBatchWrite() }()
 	
-	// 3. Start Control Plane
 	go e.handshakeWorker()
 
 	log.Printf("🚀 Engine Running (VECTORIZED TX/RX): %d Cores | VIP: %s", 
 		len(e.pconns), e.cfg.LocalVIP)
 	
-	// 4. Initial Handshakes
 	e.peersMu.RLock()
 	for _, p := range e.peers {
 		if p.GetEndpoint() != nil {
@@ -191,18 +190,14 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 	e.peersMu.RUnlock()
 
-	// Bloquear hasta error o cancelación de contexto
 	select {
 	case <-ctx.Done():
-		// Cierre solicitado por el usuario (Ctrl+C)
 		e.Close()
 		return nil
 	case err := <-errChan:
-		// Si el error ocurre y NO hemos cerrado nosotros, es un fallo real.
 		if !e.closed.Load() {
 			return err
 		}
-		// Si hemos cerrado, ignoramos el error del socket cerrado
 		return nil
 	}
 }
@@ -226,7 +221,6 @@ func (e *Engine) loopUdpBatchToTun(conn *ipv4.PacketConn, sockIdx int) error {
 	for {
 		nMsgs, err := conn.ReadBatch(msgs, 0)
 		if err != nil {
-			// Si estamos cerrando, este error es esperado.
 			if e.closed.Load() || strings.Contains(err.Error(), "closed network connection") {
 				return nil
 			}
@@ -400,17 +394,6 @@ func (e *Engine) loopUdpBatchWrite() error {
 	var connIdx int
 
 	for {
-		// En el TX loop, al ser un canal, simplemente comprobamos si el engine se cerró
-		// cuando el canal se cierre o tras cada iteración si queremos ser muy finos.
-		// Pero como la lectura del TUN morirá primero, este loop dejará de recibir datos.
-		// Para cerrarlo "bien", deberíamos cerrar txCh en Close(), pero cuidado con race conditions de escritura.
-		// La estrategia más robusta y simple aquí: confiar en que al matar el TUN reader,
-		// este loop se vacía y se bloquea en <-e.txCh.
-		// Si queremos que salga, necesitamos un select con context o cerrar el canal.
-		
-		// GOpt Decision: Dejarlo bloquear. Al terminar el main, el runtime mata todo. 
-		// No vale la pena añadir overhead aquí.
-		
 		req := <-e.txCh
 		
 		reqs[0] = req
@@ -439,7 +422,6 @@ func (e *Engine) loopUdpBatchWrite() error {
 			if e.cfg.Debug {
 				log.Printf("writebatch error: %v", err)
 			}
-			// Si está cerrado, probablemente falle la escritura.
 			if e.closed.Load() {
 				return nil
 			}

@@ -1,0 +1,17 @@
+[interface]
+mode = "client"
+tun_name = "tun0"
+vip = "10.0.0.2"
+local_addr = "0.0.0.0:0"
+private_key = "cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe"
+mtu = 1420
+debug = false
+
+# Rutas para Full Tunnel (sin romper la red local)
+routes = ["0.0.0.0/1", "128.0.0.0/1"]
+
+# --- PEER ---
+[[peers]]
+vip = "10.0.0.1"
+# Cambia esto por la IP real de tu servidor y puerto
+endpoint = "192.168.24.110:9000"

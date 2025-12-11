@@ -16,7 +16,7 @@
 - [x] **Programación Automática de IP:**
     - Taltun ahora configura automáticamente IP, Máscara (/24), MTU y estado UP de la interfaz TUN al arrancar.
     - Implementado usando `vishvananda/netlink`.
-- [ ] **Gestión de Rutas del Kernel:**
+- [x] **Gestión de Rutas del Kernel:**
     - Capacidad de añadir rutas extra en la tabla del sistema operativo (`ip route add`) para redirigir tráfico de subredes específicas.
 
 ### 🧹 8.3. Graceful Shutdown & Cleanup
@@ -79,20 +79,3 @@
 - [ ] **Utun Interface:**
     - Implementar soporte para dispositivos `utun` nativos de BSD.
     - Configuración de red mediante llamadas `ioctl` o binarios del sistema (`ifconfig`/`route` como fallback).
-
----
-
-## 📅 Fase 12: Next-Gen Performance (Future)
-**Objetivo:** 10Gbps+ Line rate.
-
-### 🚀 12.1. eBPF & XDP (Express Data Path)
-*Saltarse el stack de red del Kernel de Linux por completo.*
-- [ ] **AF_XDP Sockets:**
-    - Implementar un backend alternativo a `PacketConn` que use sockets `AF_XDP`.
-    - Permite DMA (Direct Memory Access) desde la NIC al buffer de usuario (Zero-Copy real entre NIC y App).
-    - **Meta:** Procesamiento de 10Mpps (millones de paquetes por segundo).
-
-### 📦 12.2. GRO/GSO (Generic Receive Offload)
-- [ ] **Hardware Offload:**
-    - Negociar con la tarjeta de red para que el hardware junte múltiples paquetes TCP en un solo buffer gigante antes de pasarlo a la CPU.
-    - Reducción masiva de overhead por paquete.

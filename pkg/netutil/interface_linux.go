@@ -7,15 +7,17 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
-// ConfigureInterface asigna IP, MTU y levanta la interfaz.
-func ConfigureInterface(ifaceName string, ip net.IP, mtu int) error {
+// AssignIP asigna la dirección IP a una interfaz ya existente.
+// (tun.CreateTUN ya creó la interfaz y seteó el MTU).
+func AssignIP(ifaceName string, ip net.IP) error {
 	link, err := netlink.LinkByName(ifaceName)
 	if err != nil {
 		return fmt.Errorf("no se encontró interfaz %s: %v", ifaceName, err)
 	}
 
-	if err := netlink.LinkSetMTU(link, mtu); err != nil {
-		return fmt.Errorf("error setting MTU %d: %v", mtu, err)
+	// Asegurar que está UP (wireguard-go suele levantarla, pero por seguridad)
+	if err := netlink.LinkSetUp(link); err != nil {
+		return fmt.Errorf("error levantando interfaz: %v", err)
 	}
 
 	ipNet := &net.IPNet{
@@ -34,15 +36,10 @@ func ConfigureInterface(ifaceName string, ip net.IP, mtu int) error {
 		}
 	}
 
-	if err := netlink.LinkSetUp(link); err != nil {
-		return fmt.Errorf("error levantando interfaz: %v", err)
-	}
-
 	return nil
 }
 
 // AddRoutes inyecta rutas estáticas en el Kernel apuntando a la interfaz.
-// routes: lista de CIDRs (ej: "192.168.0.0/16").
 func AddRoutes(ifaceName string, routes []string) error {
 	if len(routes) == 0 {
 		return nil

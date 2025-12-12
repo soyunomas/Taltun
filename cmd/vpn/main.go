@@ -25,7 +25,6 @@ func main() {
 	}
 
 	// 1. Setup Signal Handling (Graceful Shutdown)
-	// Creamos un contexto que se cancela al recibir SIGINT (Ctrl+C) o SIGTERM
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -52,7 +51,8 @@ func main() {
 			continue
 		}
 		
-		if err := srv.AddPeer(vip, p.Endpoint); err != nil {
+		// Inyección de AllowedIPs
+		if err := srv.AddPeer(vip, p.Endpoint, p.AllowedIPs); err != nil {
 			log.Printf("⚠️ Error añadiendo peer %s: %v", p.VIP, err)
 		} else {
 			peersAdded++
@@ -68,7 +68,6 @@ func main() {
 	}
 
 	// 2. Run with Context
-	// Bloquea hasta que ocurra un error fatal o el usuario pulse Ctrl+C
 	start := time.Now()
 	if err := srv.Run(ctx); err != nil {
 		log.Fatalf("❌ Engine falló: %v", err)

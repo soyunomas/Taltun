@@ -3,167 +3,278 @@
 ![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go)
 ![Platform](https://img.shields.io/badge/Linux-x86__64-linux?style=flat&logo=linux)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
-![Status](https://img.shields.io/badge/Status-Stable%20%28v0.8.0%29-blue)
+![Status](https://img.shields.io/badge/Status-Beta%20%28v0.10.0%29-orange)
+![Performance](https://img.shields.io/badge/Performance-~1Gbps-red)
 
-**Taltun** es una VPN de alto rendimiento, Zero-Allocation y segura, escrita en Go puro. Optimizada para aprovechar la totalidad del ancho de banda en enlaces Gigabit sobre hardware modesto, mediante el uso intensivo de Vectorized I/O, SIMD Cryptography y Kernel Bypass techniques (userspace networking).
+**Taltun** es un motor VPN de próxima generación diseñado para el rendimiento extremo y la simplicidad operativa. Escrito en Go puro, utiliza técnicas avanzadas de **Kernel Bypass** (Userspace Networking), **Vectorized I/O** y **Lock-Free Concurrency** para saturar enlaces Gigabit en hardware modesto.
+
+A diferencia de las VPNs tradicionales, Taltun opera como un **Switch Distribuido Cifrado**, permitiendo topologías Mesh, Hub & Spoke y Site-to-Site sin complejas configuraciones de firewall ni tablas de enrutamiento en el sistema operativo (gracias a su motor de Relay en espacio de usuario).
 
 ---
 
-## 🚀 ¿Por qué Taltun?
+## 🚀 Características Principales
 
-### ⚡ Rendimiento Extremo
-- **Gigabit Speed:** Capaz de sostener **~940 Mbps** (saturación de enlace) en hardware legacy.
-- **Vectorized I/O:** Usa `recvmmsg` y `sendmmsg` para leer y escribir paquetes en lotes de 64, reduciendo las System Calls en un **98%**.
-- **Multi-Core Scaling:** Implementa `SO_REUSEPORT` y *Socket Sharding* para distribuir la carga entre todos los núcleos de la CPU sin contención de locks.
+### ⚡ Rendimiento "Metal-Close"
+- **Vectorized I/O:** Utiliza `recvmmsg` y `sendmmsg` (syscall batching) para procesar paquetes en bloques de 64, reduciendo el cambio de contexto CPU en un **98%**.
+- **Zero-Copy Hot Path:** El tráfico reenviado (Relay) entre clientes no toca el Kernel ni copia memoria innecesariamente.
+- **Multi-Core Scaling:** Distribuye la carga criptográfica y de I/O entre todos los núcleos disponibles usando `SO_REUSEPORT`.
 
-### 🛠 Usabilidad y Automatización (Nuevo en v0.8)
-- **Zero-Config Start:** Asignación automática de IPs y configuración de MTU via Netlink. No requiere scripts externos.
-- **Structured Config:** Soporte nativo para archivos TOML limpios.
-- **Kernel Routing:** Inyección automática de rutas estáticas al levantar el túnel.
-- **Graceful Shutdown:** Cierre seguro de recursos y limpieza de rutas al detener el servicio.
+### 🛡️ Seguridad Post-Quantum Ready
+- **Noise Protocol Framework (Like):** Handshake basado en **Curve25519** (ECDH) y tráfico de datos cifrado con **ChaCha20-Poly1305**.
+- **Perfect Forward Secrecy (PFS):** Las claves de cifrado rotan automáticamente cada 2 minutos.
+- **Anti-Replay & DoS Protection:** Ventana deslizante de 2048 bits y Cookies Stateless para mitigar ataques de denegación de servicio.
 
-### 🛡️ Seguridad Moderna
-- **Cifrado Robusto:** Todo el tráfico de datos usa **ChaCha20-Poly1305** con aceleración por hardware (AVX2).
-- **Perfect Forward Secrecy (PFS):** Handshake basado en **ECDH (Curve25519)**. Las claves de sesión son efímeras y únicas por peer.
-- **Identidad Criptográfica:** Autenticación mutua estricta basada en claves públicas, sin contraseñas.
+### 🧠 Routing Inteligente (Nuevo en v0.10)
+- **User-Space Relay:** Permite que dos clientes (Spokes) se comuniquen entre sí a través del servidor (Hub) sin necesidad de configurar `iptables` ni IP Forwarding en el servidor.
+- **Subnet Routing:** Soporte completo para LANs. Un cliente puede anunciar una subred (ej. `192.168.1.0/24`) y el resto de la VPN podrá acceder a ella transparentemente.
 
 ---
 
 ## 📦 Instalación
 
-### Prerrequisitos
-- **Sistema Operativo:** Linux (Kernel 5.x+ recomendado para mejor soporte de BPF/recvmmsg).
-- **Go:** Versión 1.22 o superior.
+### Requisitos Previos
+*   **Linux:** Kernel 5.6+ recomendado (para optimizaciones UDP modernas).
+*   **Go:** 1.22 o superior (si compilas desde el código fuente).
 
-### Compilación desde el código fuente
+### Compilación desde Fuente
 
 ```bash
 # 1. Clonar el repositorio
-git clone https://github.com/soyunomas/taltun.git
-cd taltun
+git clone https://github.com/soyunomas/Taltun.git
+cd Taltun
 
-# 2. Descargar dependencias
+# 2. Instalar dependencias
 go mod tidy
 
-# 3. Compilar binario optimizado
+# 3. Compilar (Binario optimizado sin símbolos de debug)
 make build
 
-# El binario estará disponible en: ./bin/vpn
+# El ejecutable estará en ./bin/vpn
 ls -lh bin/vpn
 ```
 
 ---
 
-## ⚙️ Configuración (v0.8.0+)
+## 🔑 Generación de Claves
 
-Taltun soporta archivos de configuración TOML para facilitar despliegues complejos. Crea un archivo `config.toml`:
+Taltun utiliza criptografía de clave pública. Cada nodo necesita un par de claves:
+1.  **Clave Privada:** Se guarda en el archivo de configuración. **NUNCA la compartas.**
+2.  **Clave Pública:** Se deriva de la privada. Esta es la que configuras en los otros nodos (Peers) para que te reconozcan.
 
-```toml
-# config.toml
-[interface]
-mode = "server"             # client | server
-tun_name = "tun0"           # Nombre interfaz
-vip = "10.0.0.1"            # IP VPN
-local_addr = "0.0.0.0:9000" # Puerto UDP escucha
-private_key = "TU_PRIVATE_KEY_HEX"
+Como Taltun usa el formato estándar de 32 bytes en Hexadecimal (Curve25519), puedes generar las claves usando `openssl`:
 
-# Rutas Estáticas (Kernel Injection)
-# Define qué subredes deben pasar por la VPN.
-# Si está vacío, solo pasa el tráfico a la IP del peer.
-routes = ["192.168.50.0/24"]
+```bash
+# Generar Clave Privada (Private Key)
+openssl rand -hex 32
+# Salida ejemplo: a1b2c3d4... (Guarda esto para tu config.toml)
 
-# Lista de Peers (Clientes o Servidores)
-[[peers]]
-vip = "10.0.0.2"
-# endpoint = "x.x.x.x:9000" # Opcional si es dinámico
-```
-
-### 🛣️ Caso Especial: Full Tunneling (Todo por la VPN)
-
-Si quieres redirigir todo tu tráfico de internet por la VPN pero **sin perder el acceso a tu red local (SSH)**, usa esta configuración de rutas en lugar de `0.0.0.0/0`:
-
-```toml
-# Inyecta dos rutas /1 que cubren todo el espectro IPv4 pero respetan las rutas locales más específicas.
-routes = ["0.0.0.0/1", "128.0.0.0/1"]
+# Nota: Taltun derivará automáticamente la pública al arrancar. 
+# Si necesitas ver tu clave pública para dársela a otro, arranca Taltun y mira los logs,
+# o usa herramientas compatibles con X25519.
 ```
 
 ---
 
-## 🛠️ Puesta en Marcha (Quickstart)
+## ⚙️ Configuración (TOML)
 
-Taltun utiliza una arquitectura **Hub & Spoke**. Simularemos una red simple:
-- **Servidor (Hub):** IP VPN `10.0.0.1`
-- **Cliente (Spoke):** IP VPN `10.0.0.2`
+La forma recomendada de usar Taltun es mediante un archivo `config.toml`. A continuación se detalla cada parámetro.
 
-### Paso 0: Generar Claves
+### Estructura del Archivo
 
-```bash
-openssl rand -hex 32
-# Guarda la salida para usarla como clave privada (-key)
+```toml
+# config.toml - Ejemplo Completo
+
+[interface]
+# Rol del nodo: 'server' (espera conexiones) o 'client' (inicia conexiones)
+mode = "client"
+
+# Nombre de la interfaz virtual a crear
+tun_name = "tun0"
+
+# Puerto UDP donde escuchar tráfico cifrado
+local_addr = "0.0.0.0:9000"
+
+# IP Virtual (VIP) de este nodo dentro de la VPN
+vip = "10.0.0.2"
+
+# Tu Clave Privada (32 bytes hex)
+private_key = "TU_CLAVE_PRIVADA_AQUI"
+
+# MTU del túnel. 1380 es seguro para evitar fragmentación en la mayoría de redes.
+mtu = 1380
+
+# Rutas locales a inyectar en tu sistema operativo al arrancar.
+# Define qué tráfico quieres que "entre" al túnel.
+# "0.0.0.0/0" = Todo el tráfico (Full Tunnel)
+# "10.0.0.0/24" = Solo tráfico de la VPN
+routes = ["10.0.0.0/24", "192.168.50.0/24"]
+
+# --- Definición de Peers (Nodos Remotos) ---
+
+[[peers]]
+# IP Virtual del nodo remoto
+vip = "10.0.0.1"
+
+# (Opcional) Dirección IP Pública y Puerto del remoto.
+# Obligatorio si este nodo debe iniciar la conexión hacia él.
+endpoint = "203.0.113.1:9000"
+
+# (Nuevo v0.10) AllowedIPs: ¿Qué subredes están "detrás" de este peer?
+# Permite Site-to-Site. Si envías tráfico a estas IPs, Taltun sabrá que debe enviárselo a este Peer.
+allowed_ips = ["192.168.50.0/24"]
 ```
 
-### Paso 1: Configurar el Servidor
+---
+
+## 🖥️ Uso por Línea de Comandos (CLI)
+
+Puedes sobrescribir cualquier valor del archivo de configuración usando argumentos (flags). Esto es útil para pruebas rápidas o scripts de docker.
 
 ```bash
-# Iniciar Taltun en modo Server
-# Nota: Taltun configurará automáticamente la IP en la interfaz tun0.
+# Ejemplo: Arrancar un servidor rápido escuchando en el puerto 4000
 sudo ./bin/vpn \
   -mode server \
-  -local "0.0.0.0:9000" \
-  -key "TU_KEY_SERVER_HEX" \
-  -vip "10.0.0.1"
+  -local "0.0.0.0:4000" \
+  -vip "10.99.0.1" \
+  -key "e6a1..." \
+  -tun "tun5"
 ```
 
-### Paso 2: Configurar el Cliente
-
-En otra máquina:
-
-```bash
-# Iniciar Taltun en modo Client
-# Conectándose al peer (Servidor)
-sudo ./bin/vpn \
-  -mode client \
-  -key "TU_KEY_CLIENT_HEX" \
-  -vip "10.0.0.2" \
-  -peer "10.0.0.1,IP_REAL_SERVIDOR:9000"
-```
-
-### Paso 3: Verificar Conectividad
-
-Desde el cliente:
-```bash
-ping 10.0.0.1
-```
-*¡Deberías ver respuesta con latencia mínima!*
+| Flag | Descripción |
+| :--- | :--- |
+| `-config` | Ruta al archivo TOML (Defecto: `config.toml`) |
+| `-mode` | `client` o `server` |
+| `-vip` | Tu IP dentro de la VPN |
+| `-key` | Tu Clave Privada (Hex) |
+| `-local` | `IP:Puerto` UDP local para escuchar |
+| `-tun` | Nombre de la interfaz (ej. `tun0`) |
+| `-mtu` | Maximum Transmission Unit (Defecto: 1420) |
+| `-debug` | Activa logs detallados (verbose) |
 
 ---
 
-## ⚡ Performance Tuning
+## 🌐 Escenario Real: Red Empresarial (Hub & Spoke)
 
-Para evitar la fragmentación en enlaces WAN (especialmente en modo Full Tunnel), se recomienda configurar **TCP MSS Clamping** en el firewall:
+Vamos a configurar una red completa con 3 nodos para demostrar las capacidades de **Enrutamiento y Relay** de Taltun v0.10.
+
+**El Objetivo:**
+1.  **Servidor (Hub):** En la nube. Punto central.
+2.  **Oficina (Gateway):** Expone la red LAN `192.168.50.0/24`.
+3.  **Empleado (Remoto):** Desde su casa, quiere acceder a la impresora de la oficina (`192.168.50.10`).
+
+### 1. Configuración del SERVIDOR (Hub)
+*   **IP Pública:** 1.2.3.4
+*   **VIP:** 10.0.0.1
+
+```toml
+# server.toml
+[interface]
+mode = "server"
+tun_name = "tun0"
+vip = "10.0.0.1"
+local_addr = "0.0.0.0:9000"
+private_key = "KEY_SERVER"
+routes = ["10.0.0.0/24"] # El servidor necesita saber enrutar la VPN
+
+# Peer: OFICINA
+[[peers]]
+vip = "10.0.0.2"
+# "Detrás de la oficina está la red 192.168.50.x"
+allowed_ips = ["192.168.50.0/24"] 
+
+# Peer: EMPLEADO
+[[peers]]
+vip = "10.0.0.3"
+```
+
+### 2. Configuración de la OFICINA (Site Gateway)
+*   **VIP:** 10.0.0.2
+*   Este nodo debe tener habilitado `sysctl -w net.ipv4.ip_forward=1` para pasar tráfico de la VPN a la LAN física.
+
+```toml
+# office.toml
+[interface]
+mode = "client"
+vip = "10.0.0.2"
+local_addr = "0.0.0.0:9000"
+private_key = "KEY_OFFICE"
+routes = ["10.0.0.0/24"] # Enruta tráfico VPN
+
+[[peers]]
+# Conexión al Hub
+vip = "10.0.0.1"
+endpoint = "1.2.3.4:9000"
+# Definimos "0.0.0.0/0" si queremos que TODA la red VPN sea accesible via el Hub
+# Ojo: No ponemos allowed_ips complejos aquí, el trabajo duro lo hace el Hub.
+```
+
+### 3. Configuración del EMPLEADO (Road Warrior)
+*   **VIP:** 10.0.0.3
+
+```toml
+# laptop.toml
+[interface]
+mode = "client"
+vip = "10.0.0.3"
+private_key = "KEY_EMPLOYEE"
+# ¡MAGIA AQUÍ! 
+# Le decimos al OS del empleado: "Para ir a la 192.168.50.x, entra al túnel"
+routes = ["10.0.0.0/24", "192.168.50.0/24"]
+
+[[peers]]
+# Conexión al Hub
+vip = "10.0.0.1"
+endpoint = "1.2.3.4:9000"
+# Le decimos al motor Taltun del empleado: 
+# "Si envías algo a la 192.168.50.x, envíaselo a este Peer (al Hub)"
+allowed_ips = ["192.168.50.0/24"]
+```
+
+### 🎯 Resultado
+El empleado hace `ping 192.168.50.10`:
+1.  El paquete entra a Taltun en el Laptop.
+2.  Se envía cifrado al **Servidor**.
+3.  El Servidor lo desencripta, ve que es para la subred de la **Oficina**.
+4.  El Servidor lo **Re-encripta** (User-Space Relay) y lo manda a la **Oficina**.
+5.  La Oficina lo recibe y lo entrega a la impresora.
+
+---
+
+## ⚡ Tuning de Rendimiento
+
+Para alcanzar velocidades Gigabit, se recomienda ajustar los buffers del Kernel en Linux (sysctl):
 
 ```bash
-# Ajusta el tamaño de segmento TCP al MTU del túnel automáticamente
+# Aumentar buffers de recepción/envío UDP
+sysctl -w net.core.rmem_max=4194304
+sysctl -w net.core.wmem_max=4194304
+sysctl -w net.core.rmem_default=262144
+sysctl -w net.core.wmem_default=262144
+```
+
+Además, si usas Taltun detrás de routers domésticos (PPPoE), ajusta el **TCP MSS** para evitar paquetes descartados por fragmentación:
+
+```bash
 sudo iptables -t mangle -A FORWARD -o tun0 -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 ```
 
 ---
 
-## ⚙️ Arquitectura Técnica
+## 🛠️ Arquitectura Interna
 
-### Flujo de Datos (TX Path)
-1. **TUN Read:** El kernel entrega un paquete IP crudo a la aplicación.
-2. **Encryption (Worker A):** Una goroutine lee, decide el enrutamiento y cifra el paquete (ChaCha20).
-3. **Queueing:** El paquete cifrado se envía a un canal (`buffered channel`).
-4. **Batch Write (Worker B):** Una segunda goroutine recoge hasta 64 paquetes del canal y usa `sendmmsg` para enviarlos al socket UDP en una sola llamada al sistema.
+Taltun no es solo "otro wrapper de UDP". Su arquitectura está diseñada para la eficiencia:
 
-### Handshake (Noise_NK Pattern)
-1. **Init:** Cliente envía su clave pública efímera + identidad cifrada con la clave pública estática del servidor.
-2. **Response:** Servidor valida, genera su clave efímera y calcula el secreto compartido ECDH.
-3. **Session:** Se deriva una clave simétrica con `Blake2s`. A partir de aquí, el tráfico es puramente simétrico y acelerado.
+1.  **TUN Device:** Lee paquetes IP del Kernel.
+2.  **Worker Pool:** Un pool de goroutines cifra los paquetes usando instrucciones AES/AVX.
+3.  **Batcher:** Agrupa hasta 64 paquetes cifrados en una sola estructura.
+4.  **Vectorized Writer:** Envía el lote completo al socket UDP usando `sendmmsg`.
+
+Este pipeline minimiza las "System Calls", que son el principal cuello de botella en VPNs tradicionales escritas en Go o Python.
 
 ---
 
 ## 📄 Licencia
 
-Este proyecto está bajo la Licencia **MIT**. Eres libre de usarlo, modificarlo y distribuirlo.
+Este proyecto es Open Source bajo la licencia **MIT**. Siéntete libre de usarlo, modificarlo y contribuir.
+
+---

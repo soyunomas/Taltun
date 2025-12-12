@@ -1,0 +1,56 @@
+# --- /etc/taltun/client.example.toml ---
+# Archivo de configuración para Cliente Taltun
+#
+# SEGURIDAD: Este archivo contiene la CLAVE PRIVADA.
+# Asegúrate de ejecutar: chmod 600 /etc/taltun/client.toml
+
+[interface]
+# -----------------------------------------------------------------------------
+# Configuración del Nodo Local
+# -----------------------------------------------------------------------------
+
+mode = "client"
+tun_name = "tun0"
+
+# IP Virtual de este cliente (debe ser única en la VPN).
+vip = "10.100.0.2"
+
+# Puerto local. "0.0.0.0:0" elegirá un puerto aleatorio disponible.
+# Si estás detrás de un NAT estricto, a veces ayuda fijar un puerto (ej. :51821).
+local_addr = "0.0.0.0:0"
+
+# Tu Clave Privada (Distinta a la del servidor).
+private_key = "PON_AQUI_OTRA_PRIVATE_KEY_GENERADA"
+
+mtu = 1380
+
+# [Rutas del Sistema] - ¿Qué tráfico quieres enviar por la VPN?
+#
+# Opción A: Split Tunneling (Solo tráfico VPN y redes internas)
+# routes = ["10.100.0.0/24", "192.168.50.0/24"]
+#
+# Opción B: Full Tunneling (Todo el tráfico de internet pasa por la VPN)
+# routes = ["0.0.0.0/1", "128.0.0.0/1"]
+routes = ["10.100.0.0/24"]
+
+# -----------------------------------------------------------------------------
+# Definición de Peers (Conexión al Servidor)
+# -----------------------------------------------------------------------------
+
+[[peers]]
+# La IP Virtual del Servidor
+vip = "10.100.0.1"
+
+# La dirección IP PÚBLICA y PUERTO del servidor.
+# Esto es obligatorio para que el cliente sepa dónde llamar.
+endpoint = "203.0.113.10:51820"
+
+# [AllowedIPs]
+# Le decimos al motor interno: "Si vas a enviar algo a la red de la Oficina Remota (192.168.50.x),
+# envíaselo al Servidor (él sabrá hacer el relay)".
+# Normalmente aquí pones todas las subredes que quieres alcanzar a través del Hub.
+allowed_ips = ["192.168.50.0/24"]
+
+# Keepalive: Envia un ping vacío cada 25 segundos si no hay tráfico.
+# Es vital para mantener la conexión abierta en routers domésticos (NAT).
+# (Este valor está hardcoded a 10s en el código actual, pero útil documentarlo aquí si se expone en el futuro)

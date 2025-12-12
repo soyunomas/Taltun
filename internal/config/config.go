@@ -22,7 +22,7 @@ type Config struct {
 	Debug      bool
 	LocalVIP   net.IP
 	
-	// Rutas adicionales a inyectar en el Kernel
+	// Rutas locales a inyectar en el Kernel
 	Routes []string
 
 	// Lista de peers pre-procesada para el arranque
@@ -31,8 +31,9 @@ type Config struct {
 
 // PeerConfig define la estructura para config.toml y flags.
 type PeerConfig struct {
-	VIP      string `toml:"vip"`
-	Endpoint string `toml:"endpoint"` // Opcional
+	VIP        string   `toml:"vip"`
+	Endpoint   string   `toml:"endpoint"` // Opcional
+	AllowedIPs []string `toml:"allowed_ips"` // <--- NUEVO: Subredes detrás del peer
 }
 
 // fileConfig es el mapeo intermedio para TOML.
@@ -45,7 +46,7 @@ type fileConfig struct {
 		VIP        *string   `toml:"vip"`
 		MTU        *int      `toml:"mtu"`
 		Debug      *bool     `toml:"debug"`
-		Routes     []string  `toml:"routes"` // <--- NUEVO
+		Routes     []string  `toml:"routes"`
 	} `toml:"interface"`
 
 	Peers []PeerConfig `toml:"peers"`
@@ -106,7 +107,7 @@ func Load() (*Config, error) {
 		if fc.Interface.Debug != nil { cfg.Debug = *fc.Interface.Debug }
 		if fc.Interface.PrivateKey != nil { fileKey = *fc.Interface.PrivateKey }
 		if fc.Interface.VIP != nil { fileVIP = *fc.Interface.VIP }
-		if fc.Interface.Routes != nil { cfg.Routes = fc.Interface.Routes } // <--- NUEVO
+		if fc.Interface.Routes != nil { cfg.Routes = fc.Interface.Routes }
 		
 		cfg.Peers = fc.Peers
 	}

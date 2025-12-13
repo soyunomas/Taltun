@@ -1,26 +1,36 @@
 package engine
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"log"
 	"net"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Soyunomas/taltun/internal/config"
 	"github.com/Soyunomas/taltun/internal/session"
+	"github.com/Soyunomas/taltun/pkg/cookie"
 	"github.com/Soyunomas/taltun/pkg/crypto"
 	"github.com/Soyunomas/taltun/pkg/netutil"
 	"github.com/Soyunomas/taltun/pkg/pool"
 	"github.com/Soyunomas/taltun/pkg/protocol"
-	"github.com/songgao/water"
+	"github.com/Soyunomas/taltun/pkg/router"
+	
 	"golang.org/x/net/ipv4"
+	"golang.zx2c4.com/wireguard/tun"
 )
 
 // BatchSize define cuántos paquetes leemos/escribimos de golpe.
 const BatchSize = 64
+
+// TunHeadroom: Espacio reservado al inicio del buffer para que el driver TUN
+// escriba sus cabeceras (Packet Info) sin realocar memoria.
+const TunHeadroom = 16
 
 type HandshakeRequest struct {
 	RemoteAddr *net.UDPAddr
@@ -35,27 +45,43 @@ type txRequest struct {
 	Addr *net.UDPAddr // Destino
 }
 
+type TxBatch struct {
+	Reqs [BatchSize]txRequest
+	Len  int
+}
+
+var txBatchPool = sync.Pool{
+	New: func() interface{} {
+		return &TxBatch{}
+	},
+}
+
+type PeerMap = map[uint32]*PeerInfo
+
 type Engine struct {
 	cfg   *config.Config
-	ifce  *water.Interface
 	
-	// Usamos ipv4.PacketConn para tener acceso a ReadBatch y WriteBatch
+	ifce  tun.Device
+	
 	pconns []*ipv4.PacketConn
-	// Guardamos la referencia al UDPConn original
 	rawConns []*net.UDPConn
 	
 	staticKey *crypto.KeyPair
 	localVIP  uint32
 
-	peers   map[uint32]*PeerInfo
-	peersMu sync.RWMutex
+	// Protection Modules
+	cookieProtector *cookie.Protector
+
+	// Routing & Peering
+	peers        atomic.Pointer[PeerMap]
+	router       *router.Router 
+	peersWriteMu sync.Mutex
 
 	handshakeCh chan HandshakeRequest
+	txCh        chan *TxBatch
 	
-	// Canal para desacoplar lectura de TUN y escritura UDP (Batching TX)
-	txCh chan txRequest
-
 	txCounter   uint64
+	closed atomic.Bool
 }
 
 type PeerInfo = session.Peer
@@ -68,18 +94,23 @@ func New(c *config.Config) (*Engine, error) {
 	
 	myVIP := netutil.IPToUint32(c.LocalVIP)
 
-	return &Engine{
-		cfg:         c,
-		staticKey:   kp,
-		localVIP:    myVIP,
-		peers:       make(map[uint32]*PeerInfo),
-		handshakeCh: make(chan HandshakeRequest, 500),
-		// Buffer grande para absorber ráfagas del TUN antes de enviar
-		txCh:        make(chan txRequest, 1024), 
-	}, nil
+	e := &Engine{
+		cfg:             c,
+		staticKey:       kp,
+		localVIP:        myVIP,
+		cookieProtector: cookie.NewProtector(),
+		router:          router.New(),
+		handshakeCh:     make(chan HandshakeRequest, 500),
+		txCh:            make(chan *TxBatch, 256), 
+	}
+
+	initialPeers := make(PeerMap)
+	e.peers.Store(&initialPeers)
+
+	return e, nil
 }
 
-func (e *Engine) AddPeer(virtualIP net.IP, remoteAddr string) error {
+func (e *Engine) AddPeer(virtualIP net.IP, remoteAddr string, allowedIPs []string) error {
 	vip := netutil.IPToUint32(virtualIP)
 	if vip == 0 {
 		return fmt.Errorf("ip virtual invalida")
@@ -97,23 +128,53 @@ func (e *Engine) AddPeer(virtualIP net.IP, remoteAddr string) error {
 
 	p := session.NewPeer(vip, udpAddr)
 
-	e.peersMu.Lock()
-	e.peers[vip] = p
-	e.peersMu.Unlock()
+	e.peersWriteMu.Lock()
+	defer e.peersWriteMu.Unlock()
 
-	log.Printf("🔗 Peer Configurado: VIP=%s Endpoint=%v", virtualIP, remoteAddr)
+	oldMap := *e.peers.Load()
+	newMap := make(PeerMap, len(oldMap)+1)
+	for k, v := range oldMap {
+		newMap[k] = v
+	}
+	newMap[vip] = p
+	e.peers.Store(&newMap)
+
+	e.router.Insert(fmt.Sprintf("%s/32", virtualIP.String()), p)
+
+	for _, cidr := range allowedIPs {
+		if err := e.router.Insert(cidr, p); err != nil {
+			log.Printf("⚠️ Error añadiendo AllowedIP %s para peer %s: %v", cidr, virtualIP, err)
+		} else {
+			log.Printf("twisted_rightwards_arrows Route: %s -> Peer %s", cidr, virtualIP)
+		}
+	}
+
+	log.Printf("🔗 Peer Configurado: VIP=%s Endpoint=%v AllowedIPs=%d", virtualIP, remoteAddr, len(allowedIPs))
 	return nil
 }
 
 func (e *Engine) Initialize() error {
-	cfg := water.Config{ DeviceType: water.TUN }
-	cfg.PlatformSpecificParams.Name = e.cfg.TunName
-	
-	ifce, err := water.New(cfg)
+	dev, err := tun.CreateTUN(e.cfg.TunName, e.cfg.MTU)
 	if err != nil {
 		return fmt.Errorf("error creando TUN: %v", err)
 	}
-	e.ifce = ifce
+	e.ifce = dev
+
+	ip := netutil.Uint32ToIP(e.localVIP)
+	log.Printf("🔧 Configurando Interfaz %s: IP=%s/24 MTU=%d", e.cfg.TunName, ip, e.cfg.MTU)
+	
+	if err := netutil.AssignIP(e.cfg.TunName, ip); err != nil {
+		dev.Close()
+		return fmt.Errorf("fallo asignando IP: %v", err)
+	}
+
+	if len(e.cfg.Routes) > 0 {
+		log.Printf("🛣️  Añadiendo rutas estáticas locales: %v", e.cfg.Routes)
+		if err := netutil.AddRoutes(e.cfg.TunName, e.cfg.Routes); err != nil {
+			dev.Close()
+			return fmt.Errorf("fallo añadiendo rutas: %v", err)
+		}
+	}
 
 	numCPU := runtime.NumCPU()
 	e.pconns = make([]*ipv4.PacketConn, numCPU)
@@ -124,6 +185,7 @@ func (e *Engine) Initialize() error {
 	for i := 0; i < numCPU; i++ {
 		c, err := netutil.ListenUDPReusePort("udp", e.cfg.LocalAddr)
 		if err != nil {
+			dev.Close()
 			return fmt.Errorf("error binding socket %d: %v", i, err)
 		}
 		e.rawConns[i] = c
@@ -133,10 +195,24 @@ func (e *Engine) Initialize() error {
 	return nil
 }
 
-func (e *Engine) Run() error {
-	errChan := make(chan error, len(e.pconns)+2)
+func (e *Engine) Close() {
+	if e.closed.Swap(true) {
+		return
+	}
+	log.Println("🛑 Cerrando recursos (TUN/UDP)...")
+	
+	for _, c := range e.rawConns {
+		c.Close()
+	}
+	
+	if e.ifce != nil {
+		e.ifce.Close()
+	}
+}
 
-	// 1. Start Batch RX Workers (UDP -> TUN)
+func (e *Engine) Run(ctx context.Context) error {
+	errChan := make(chan error, len(e.pconns)+3)
+
 	for i, pc := range e.pconns {
 		idx := i
 		pconn := pc
@@ -145,29 +221,86 @@ func (e *Engine) Run() error {
 		}()
 	}
 
-	// 2. Start TX Split Pipeline (TUN -> UDP)
 	go func() { errChan <- e.loopTunReadAndEncrypt() }()
 	go func() { errChan <- e.loopUdpBatchWrite() }()
+	go func() { errChan <- e.housekeepingWorker(ctx) }() 
 	
-	// 3. Start Control Plane
 	go e.handshakeWorker()
 
-	log.Printf("🚀 Engine Running (VECTORIZED TX/RX): %d Cores | VIP: %s", 
+	log.Printf("🚀 Engine Running (ROUTING V2): %d Cores | VIP: %s", 
 		len(e.pconns), e.cfg.LocalVIP)
 	
-	// 4. Initial Handshakes
-	e.peersMu.RLock()
-	for _, p := range e.peers {
+	currentPeers := *e.peers.Load()
+	for _, p := range currentPeers {
 		if p.GetEndpoint() != nil {
 			go e.sendHandshakeInit(p)
 		}
 	}
-	e.peersMu.RUnlock()
 
-	return <-errChan
+	select {
+	case <-ctx.Done():
+		e.Close()
+		return nil
+	case err := <-errChan:
+		if !e.closed.Load() {
+			return err
+		}
+		return nil
+	}
 }
 
-// --- DATAPLANE RX (UDP -> TUN) ---
+// --- HOUSEKEEPING (Rekey + Keepalives) ---
+
+func (e *Engine) housekeepingWorker(ctx context.Context) error {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			currentPeers := *e.peers.Load()
+			for _, p := range currentPeers {
+				if p.NeedsRekey() {
+					p.MarkHandshakePending()
+					e.sendHandshakeInit(p)
+				}
+				if p.NeedsKeepalive() {
+					e.sendKeepalive(p)
+				}
+			}
+		}
+	}
+}
+
+func (e *Engine) sendKeepalive(p *PeerInfo) {
+	aead := p.GetAEAD()
+	endpoint := p.GetEndpoint()
+	if aead == nil || endpoint == nil {
+		return
+	}
+
+	pkt := pool.Get()
+	defer pool.Put(pkt)
+
+	nonceBuf := make([]byte, protocol.NonceSize)
+	copy(nonceBuf[0:4], []byte{0xCA, 0xFE, 0xBA, 0xBE})
+	ctr := atomic.AddUint64(&e.txCounter, 1)
+	binary.BigEndian.PutUint64(nonceBuf[4:], ctr)
+
+	protocol.EncodeDataHeader(pkt[:], e.localVIP, nonceBuf)
+	
+	encrypted := aead.Seal(pkt[protocol.HeaderSize:protocol.HeaderSize], nonceBuf, nil, nil)
+	totalLen := protocol.HeaderSize + len(encrypted)
+
+	if len(e.rawConns) > 0 {
+		e.rawConns[0].WriteToUDP(pkt[:totalLen], endpoint)
+		p.UpdateTimestamps(false)
+	}
+}
+
+// --- DATAPLANE RX (UDP -> TUN + RELAY) ---
 
 func (e *Engine) loopUdpBatchToTun(conn *ipv4.PacketConn, sockIdx int) error {
 	log.Printf("⚡ Batch RX Worker #%d iniciado", sockIdx)
@@ -180,13 +313,15 @@ func (e *Engine) loopUdpBatchToTun(conn *ipv4.PacketConn, sockIdx int) error {
 		msgs[i].Buffers = [][]byte{buffers[i][:]}
 	}
 
-	// Hot-Path Variables: Cache local de Peer
 	var lastVIP uint32
 	var lastPeer *PeerInfo
 
 	for {
 		nMsgs, err := conn.ReadBatch(msgs, 0)
 		if err != nil {
+			if e.closed.Load() || strings.Contains(err.Error(), "closed network connection") {
+				return nil
+			}
 			return fmt.Errorf("readbatch error: %v", err)
 		}
 
@@ -196,25 +331,50 @@ func (e *Engine) loopUdpBatchToTun(conn *ipv4.PacketConn, sockIdx int) error {
 			rAddr := msg.Addr.(*net.UDPAddr)
 			packet := buffers[i][:n]
 
-			// Pasamos punteros a la caché para actualizarla si cambia
-			e.processOnePacket(packet, rAddr, sockIdx, &lastVIP, &lastPeer)
+			e.processOnePacket(packet, buffers[i], rAddr, sockIdx, &lastVIP, &lastPeer)
 			
+			buffers[i] = pool.Get()
 			msgs[i].Buffers[0] = buffers[i][:]
 		}
 	}
 }
 
-// processOnePacket optimizado con Peer Caching
-func (e *Engine) processOnePacket(pkt []byte, rAddr *net.UDPAddr, sockIdx int, lastVIP *uint32, lastPeer **PeerInfo) {
+func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *net.UDPAddr, sockIdx int, lastVIP *uint32, lastPeer **PeerInfo) {
 	if len(pkt) < 1 {
+		pool.Put(originalBuff) 
 		return
 	}
 	msgType := pkt[0]
 
-	// --- Control Plane (Sin cambios) ---
+	// 1. Control Plane
 	if msgType == protocol.MsgTypeHandshakeInit || msgType == protocol.MsgTypeHandshakeResp {
+		underLoad := len(e.handshakeCh) > 250
+		
+		_, _, cookie, err := protocol.ParseHandshake(pkt)
+		if err != nil {
+			pool.Put(originalBuff)
+			return
+		}
+
+		if underLoad {
+			validCookie := false
+			if len(cookie) > 0 {
+				if e.cookieProtector.ValidateCookie(rAddr.IP, cookie) {
+					validCookie = true
+				}
+			}
+
+			if !validCookie {
+				replyCookie := e.cookieProtector.GenerateCookie(rAddr.IP)
+				e.sendCookieReply(rAddr, replyCookie, sockIdx)
+				pool.Put(originalBuff)
+				return 
+			}
+		}
+
 		handshakePkt := make([]byte, len(pkt))
 		copy(handshakePkt, pkt)
+		pool.Put(originalBuff)
 		
 		select {
 		case e.handshakeCh <- HandshakeRequest{
@@ -225,194 +385,354 @@ func (e *Engine) processOnePacket(pkt []byte, rAddr *net.UDPAddr, sockIdx int, l
 		default:
 		}
 		return
-	}
 
-	// --- Data Plane ---
-	_, senderVIP, nonce, ciphertext, err := protocol.ParseHeader(pkt)
-	if err != nil {
+	} else if msgType == protocol.MsgTypeCookieReply {
+		cookieBytes, err := protocol.ParseCookieReply(pkt)
+		if err == nil {
+			currentPeers := *e.peers.Load()
+			for _, p := range currentPeers {
+				ep := p.GetEndpoint()
+				if ep != nil && ep.IP.Equal(rAddr.IP) && ep.Port == rAddr.Port {
+					p.SetCookie(cookieBytes)
+					go e.sendHandshakeInit(p)
+					break
+				}
+			}
+		}
+		pool.Put(originalBuff)
 		return
 	}
 
-	// --- OPTIMIZACIÓN: Peer Cache Lookup ---
-	// Si el paquete viene del mismo VIP que el anterior, nos ahorramos el RLock y el Map Lookup
+	// 2. Data Plane (Hot Path)
+	_, senderVIP, nonce, ciphertext, err := protocol.ParseHeader(pkt)
+	if err != nil {
+		pool.Put(originalBuff)
+		return
+	}
+
 	var peer *PeerInfo
 	
 	if *lastPeer != nil && *lastVIP == senderVIP {
-		// HIT de Caché
 		peer = *lastPeer
 	} else {
-		// MISS de Caché: Buscar y actualizar
-		e.peersMu.RLock()
-		peer = e.peers[senderVIP]
-		e.peersMu.RUnlock()
+		currentPeers := *e.peers.Load()
+		peer = currentPeers[senderVIP]
 		
 		if peer != nil {
-			// Actualizar caché para el siguiente paquete
 			*lastVIP = senderVIP
 			*lastPeer = peer
 		}
 	}
 
 	if peer == nil {
+		pool.Put(originalBuff)
 		return
 	}
 
-	aead := peer.GetAEAD()
-	if aead == nil {
-		return
-	}
-
-	// Decrypt
-	outBufPtr := pool.Get()
-	defer pool.Put(outBufPtr)
+	plaintextBufPtr := pool.Get()
 	
-	plaintext, err := aead.Open(outBufPtr[:0], nonce, ciphertext, nil)
+	// Abrir cifrado dejando Headroom para TUN (offset 16)
+	plaintext, err := peer.Open(plaintextBufPtr[TunHeadroom:TunHeadroom], nonce, ciphertext, nil)
 	if err != nil {
+		pool.Put(plaintextBufPtr)
+		pool.Put(originalBuff)
 		return
 	}
+	
+	pool.Put(originalBuff)
 
-	// NAT Update (Solo si cambia, para no bloquear con SetEndpoint)
-	currentEP := peer.GetEndpoint()
-	// Comprobación rápida de punteros primero, luego string
-	if currentEP != rAddr { 
-		// Es probable que rAddr sea un objeto nuevo cada vez en ReadBatch, así que
-		// comparamos IPs y Puertos si los objetos son distintos en memoria.
-		// Para evitar overhead de String(), comparamos campos básicos si es posible,
-		// o asumimos que el endpoint es estable.
-		// En este hot-path, simplificamos: Solo actualizamos si el sistema de control lo pide
-		// o usamos una lógica más laxa. Por ahora lo dejamos igual pero con el ojo puesto.
-		if currentEP == nil || currentEP.String() != rAddr.String() {
-			peer.SetEndpoint(rAddr)
+	if len(nonce) >= 12 {
+		counter := binary.BigEndian.Uint64(nonce[4:12])
+		if !peer.ValidateReplay(counter) {
+			pool.Put(plaintextBufPtr)
+			return
 		}
 	}
+
+	currentEP := peer.GetEndpoint()
+	shouldUpdate := false
+	if currentEP == nil {
+		shouldUpdate = true
+	} else if currentEP.Port != rAddr.Port || !currentEP.IP.Equal(rAddr.IP) {
+		shouldUpdate = true
+	}
 	
+	if shouldUpdate {
+		newEP := &net.UDPAddr{IP: make(net.IP, len(rAddr.IP)), Port: rAddr.Port}
+		copy(newEP.IP, rAddr.IP)
+		peer.SetEndpoint(newEP)
+	}
+
+	peer.UpdateTimestamps(true) 
+
+	if len(plaintext) == 0 {
+		pool.Put(plaintextBufPtr)
+		return
+	}
+
 	atomic.AddUint64(&peer.BytesRx, uint64(len(plaintext)))
 
-	// Write TUN
-	e.ifce.Write(plaintext)
+	dstIP := netutil.ExtractDstIP(plaintext)
+	
+	// --- ENRUTAMIENTO CRÍTICO (Gateway / Site-to-Site Fix) ---
+
+	// 1. ¿Es para MÍ (VIP)? -> Aceptamos incondicionalmente.
+	if dstIP == e.localVIP {
+		writeToTun(e, plaintext, plaintextBufPtr)
+		return
+	}
+
+	// 2. ¿Es para OTRO peer conocido en la malla? -> Relay.
+	targetPeer := e.router.Lookup(dstIP)
+	if targetPeer != nil {
+		e.sendRelay(plaintext, plaintextBufPtr, targetPeer)
+		return
+	}
+
+	// 3. ¿No es VIP ni es Peer? -> GATEWAY MODE
+	// Si el paquete llegó hasta aquí autenticado, es porque el servidor nos lo envió
+	// confiando en que está en nuestra red local (AllowedIPs en servidor).
+	// Lo escribimos en TUN y que el Kernel decida si lo enruta a la LAN.
+	
+	// Nota: Un filtro de seguridad extra aquí sería ideal, pero para V10.0 con esto basta.
+	writeToTun(e, plaintext, plaintextBufPtr)
 }
 
-// --- DATAPLANE TX SPLIT (TUN -> CHANNEL -> UDP BATCH) ---
+func writeToTun(e *Engine, plaintext []byte, buff *pool.Buff) {
+	// Offset write para cabeceras TUN
+	packetLen := len(plaintext)
+	fullPacket := buff[:TunHeadroom+packetLen]
+
+	if _, err := e.ifce.Write([][]byte{fullPacket}, TunHeadroom); err != nil {
+		if e.cfg.Debug {
+			log.Printf("❌ TUN Write Error: %v", err)
+		}
+	}
+	pool.Put(buff)
+}
+
+func (e *Engine) sendRelay(plaintext []byte, buff *pool.Buff, peer *PeerInfo) {
+	endpoint := peer.GetEndpoint()
+	aead := peer.GetAEAD()
+
+	if endpoint == nil || aead == nil {
+		pool.Put(buff)
+		return
+	}
+
+	outBufPtr := pool.Get()
+	outBuf := outBufPtr[:]
+	
+	offset := protocol.HeaderSize
+	
+	copy(outBuf[offset:], plaintext)
+	pool.Put(buff)
+
+	nonceBuf := make([]byte, protocol.NonceSize) 
+	copy(nonceBuf[0:4], []byte{0xCA, 0xFE, 0xBA, 0xBE})
+	ctr := atomic.AddUint64(&e.txCounter, 1)
+	binary.BigEndian.PutUint64(nonceBuf[4:], ctr)
+
+	protocol.EncodeDataHeader(outBuf[:offset], e.localVIP, nonceBuf)
+
+	encrypted := aead.Seal(outBuf[offset:offset], nonceBuf, outBuf[offset:offset+len(plaintext)], nil)
+	totalLen := offset + len(encrypted)
+
+	atomic.AddUint64(&peer.BytesTx, uint64(len(encrypted)))
+	
+	req := txRequest{
+		Data: outBuf[:totalLen],
+		Buff: outBufPtr,
+		Addr: endpoint,
+	}
+
+	newBatch := txBatchPool.Get().(*TxBatch)
+	newBatch.Reqs[0] = req
+	newBatch.Len = 1
+	
+	select {
+	case e.txCh <- newBatch:
+	default:
+		pool.Put(outBufPtr)
+		txBatchPool.Put(newBatch)
+		if e.cfg.Debug {
+			log.Println("⚠️ DROP (Relay): TX Channel Full")
+		}
+	}
+}
+
+// --- DATAPLANE TX SPLIT (TUN -> BATCH -> CHANNEL -> UDP) ---
 
 func (e *Engine) loopTunReadAndEncrypt() error {
-	nonceBuf := make([]byte, protocol.NonceSize)
-	copy(nonceBuf[0:4], []byte{0xCA, 0xFE, 0xBA, 0xBE})
+	const TunBatchSize = BatchSize 
 	
-	tunBufPtr := pool.Get()
-	tunBuf := tunBufPtr[:]
-	defer pool.Put(tunBufPtr)
+	buffsPtrs := make([]*pool.Buff, TunBatchSize)
+	buffs := make([][]byte, TunBatchSize)
+	sizes := make([]int, TunBatchSize)
 
+	for i := 0; i < TunBatchSize; i++ {
+		buffsPtrs[i] = pool.Get()
+		buffs[i] = buffsPtrs[i][:]
+	}
+	
 	offset := protocol.HeaderSize
-
-	// Cache para TX también
 	var lastDstIP uint32
 	var lastPeer *PeerInfo
 
+	currentBatch := txBatchPool.Get().(*TxBatch)
+	currentBatch.Len = 0
+
 	for {
-		n, err := e.ifce.Read(tunBuf[offset:])
+		n, err := e.ifce.Read(buffs, sizes, offset)
 		if err != nil {
-			return fmt.Errorf("read tun error: %v", err)
+			if e.closed.Load() {
+				return nil
+			}
+			return fmt.Errorf("tun read error: %v", err)
 		}
 
-		dstIP := netutil.ExtractDstIP(tunBuf[offset : offset+n])
-		
-		// Optimización Caché TX
-		var peer *PeerInfo
-		if lastPeer != nil && lastDstIP == dstIP {
-			peer = lastPeer
-		} else {
-			e.peersMu.RLock()
-			peer = e.peers[dstIP]
-			e.peersMu.RUnlock()
-			if peer != nil {
-				lastDstIP = dstIP
-				lastPeer = peer
+		for i := 0; i < n; i++ {
+			size := sizes[i]
+			if size == 0 {
+				continue
+			}
+			
+			packetData := buffs[i][offset : offset+size]
+			dstIP := netutil.ExtractDstIP(packetData)
+			
+			if dstIP == 0 {
+				continue
+			}
+			
+			var peer *PeerInfo
+			
+			if lastPeer != nil && lastDstIP == dstIP {
+				peer = lastPeer
+			} else {
+				peer = e.router.Lookup(dstIP)
+
+				if peer != nil {
+					lastDstIP = dstIP
+					lastPeer = peer
+				} else {
+					if e.cfg.Debug {
+						// log.Printf("❌ DROP TX: No ruta para %s", netutil.Uint32ToIP(dstIP))
+					}
+				}
+			}
+
+			if peer == nil {
+				continue
+			}
+
+			endpoint := peer.GetEndpoint()
+			aead := peer.GetAEAD()
+
+			if endpoint == nil || aead == nil {
+				continue
+			}
+
+			outBufPtr := pool.Get()
+			outBuf := outBufPtr[:]
+			copy(outBuf[offset:], packetData)
+
+			nonceBuf := make([]byte, protocol.NonceSize)
+			copy(nonceBuf[0:4], []byte{0xCA, 0xFE, 0xBA, 0xBE})
+
+			ctr := atomic.AddUint64(&e.txCounter, 1)
+			binary.BigEndian.PutUint64(nonceBuf[4:], ctr)
+			protocol.EncodeDataHeader(outBuf[:offset], e.localVIP, nonceBuf)
+
+			encrypted := aead.Seal(outBuf[offset:offset], nonceBuf, outBuf[offset:offset+size], nil)
+			totalLen := offset + len(encrypted)
+
+			atomic.AddUint64(&peer.BytesTx, uint64(len(encrypted)))
+			peer.UpdateTimestamps(false) 
+
+			req := txRequest{
+				Data: outBuf[:totalLen],
+				Buff: outBufPtr,
+				Addr: endpoint,
+			}
+			
+			currentBatch.Reqs[currentBatch.Len] = req
+			currentBatch.Len++
+
+			if currentBatch.Len == BatchSize {
+				e.sendBatchSafe(currentBatch)
+				currentBatch = txBatchPool.Get().(*TxBatch)
+				currentBatch.Len = 0
 			}
 		}
 
-		if peer == nil {
-			continue
+		if currentBatch.Len > 0 {
+			e.sendBatchSafe(currentBatch)
+			currentBatch = txBatchPool.Get().(*TxBatch)
+			currentBatch.Len = 0
 		}
+	}
+}
 
-		endpoint := peer.GetEndpoint()
-		aead := peer.GetAEAD()
-
-		if endpoint == nil || aead == nil {
-			continue
+func (e *Engine) sendBatchSafe(batch *TxBatch) {
+	select {
+	case e.txCh <- batch:
+		// OK
+	default:
+		for i := 0; i < batch.Len; i++ {
+			pool.Put(batch.Reqs[i].Buff)
 		}
-
-		outBufPtr := pool.Get()
-		outBuf := outBufPtr[:]
-		copy(outBuf[offset:], tunBuf[offset:offset+n])
-
-		ctr := atomic.AddUint64(&e.txCounter, 1)
-		binary.BigEndian.PutUint64(nonceBuf[4:], ctr)
-
-		protocol.EncodeDataHeader(outBuf[:offset], e.localVIP, nonceBuf)
-
-		encrypted := aead.Seal(outBuf[offset:offset], nonceBuf, outBuf[offset:offset+n], nil)
-		totalLen := offset + len(encrypted)
-
-		atomic.AddUint64(&peer.BytesTx, uint64(len(encrypted)))
-
-		req := txRequest{
-			Data: outBuf[:totalLen],
-			Buff: outBufPtr,
-			Addr: endpoint,
-		}
-
-		select {
-		case e.txCh <- req:
-		default:
-			pool.Put(outBufPtr)
+		txBatchPool.Put(batch)
+		if e.cfg.Debug {
+			log.Println("⚠️ DROP TX: Channel Full")
 		}
 	}
 }
 
 func (e *Engine) loopUdpBatchWrite() error {
 	msgs := make([]ipv4.Message, BatchSize)
-	reqs := make([]txRequest, BatchSize)
 	var connIdx int
 
 	for {
-		req := <-e.txCh
+		batch := <-e.txCh
 		
-		reqs[0] = req
-		msgs[0].Buffers = [][]byte{req.Data}
-		msgs[0].Addr = req.Addr
-		count := 1
+		count := batch.Len
+		if count == 0 {
+			txBatchPool.Put(batch)
+			continue
+		}
 
-	FillBatch:
-		for count < BatchSize {
-			select {
-			case r := <-e.txCh:
-				reqs[count] = r
-				msgs[count].Buffers = [][]byte{r.Data}
-				msgs[count].Addr = r.Addr
-				count++
-			default:
-				break FillBatch
-			}
+		for i := 0; i < count; i++ {
+			msgs[i].Buffers = [][]byte{batch.Reqs[i].Data}
+			msgs[i].Addr = batch.Reqs[i].Addr
 		}
 
 		conn := e.pconns[connIdx]
 		connIdx = (connIdx + 1) % len(e.pconns)
 
-		_, err := conn.WriteBatch(msgs[:count], 0)
-		if err != nil && e.cfg.Debug {
-			log.Printf("writebatch error: %v", err)
+		n, err := conn.WriteBatch(msgs[:count], 0)
+		if err != nil {
+			if e.cfg.Debug {
+				log.Printf("writebatch error: %v", err)
+			}
+			if e.closed.Load() {
+				return nil
+			}
+		} else if n < count && e.cfg.Debug {
+			log.Printf("⚠️ WriteBatch Parcial: %d/%d enviados", n, count)
 		}
 
 		for i := 0; i < count; i++ {
-			pool.Put(reqs[i].Buff)
-			reqs[i].Buff = nil
-			reqs[i].Data = nil
+			pool.Put(batch.Reqs[i].Buff)
+			batch.Reqs[i].Buff = nil
+			batch.Reqs[i].Data = nil
 			msgs[i].Buffers = nil
 		}
+
+		txBatchPool.Put(batch)
 	}
 }
 
-// --- CONTROL PLANE (Sin cambios) ---
+// --- CONTROL PLANE ---
 
 func (e *Engine) handshakeWorker() {
 	for req := range e.handshakeCh {
@@ -421,14 +741,13 @@ func (e *Engine) handshakeWorker() {
 }
 
 func (e *Engine) processHandshake(req HandshakeRequest) {
-	senderVIP, pubKey, err := protocol.ParseHandshake(req.Packet)
+	senderVIP, pubKey, _, err := protocol.ParseHandshake(req.Packet)
 	if err != nil {
 		return
 	}
 
-	e.peersMu.RLock()
-	peer, exists := e.peers[senderVIP]
-	e.peersMu.RUnlock()
+	currentPeers := *e.peers.Load()
+	peer, exists := currentPeers[senderVIP]
 
 	if !exists {
 		return
@@ -455,23 +774,35 @@ func (e *Engine) processHandshake(req HandshakeRequest) {
 }
 
 func (e *Engine) sendHandshakeInit(p *PeerInfo) {
-	e.sendHandshakePacket(e.localVIP, protocol.MsgTypeHandshakeInit, e.staticKey.Public[:], p.GetEndpoint())
+	cookie := p.GetCookie()
+	e.sendHandshakePacket(e.localVIP, protocol.MsgTypeHandshakeInit, e.staticKey.Public[:], p.GetEndpoint(), cookie)
 }
 
 func (e *Engine) sendHandshakeResp(p *PeerInfo, addr *net.UDPAddr) {
-	e.sendHandshakePacket(e.localVIP, protocol.MsgTypeHandshakeResp, e.staticKey.Public[:], addr)
+	e.sendHandshakePacket(e.localVIP, protocol.MsgTypeHandshakeResp, e.staticKey.Public[:], addr, nil)
 }
 
-func (e *Engine) sendHandshakePacket(senderVIP uint32, msgType uint8, pubKey []byte, addr *net.UDPAddr) {
+func (e *Engine) sendHandshakePacket(senderVIP uint32, msgType uint8, pubKey []byte, addr *net.UDPAddr, cookie []byte) {
 	if addr == nil {
 		return
 	}
 	pkt := pool.Get()
 	defer pool.Put(pkt)
 
-	n, _ := protocol.EncodeHandshake(pkt[:], msgType, senderVIP, pubKey)
+	n, _ := protocol.EncodeHandshake(pkt[:], msgType, senderVIP, pubKey, cookie)
 	
 	if len(e.rawConns) > 0 {
 		e.rawConns[0].WriteToUDP(pkt[:n], addr)
+	}
+}
+
+func (e *Engine) sendCookieReply(addr *net.UDPAddr, cookie []byte, sockIdx int) {
+	pkt := pool.Get()
+	defer pool.Put(pkt)
+
+	n, _ := protocol.EncodeCookieReply(pkt[:], cookie)
+	
+	if sockIdx < len(e.rawConns) {
+		e.rawConns[sockIdx].WriteToUDP(pkt[:n], addr)
 	}
 }

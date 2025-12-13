@@ -13,9 +13,10 @@ const (
 
 // Tipos de paquete
 const (
-	MsgTypeHandshakeInit uint8 = 0x01 // Cliente -> Servidor (Hola, esta es mi PubKey)
-	MsgTypeHandshakeResp uint8 = 0x02 // Servidor -> Cliente (Hola, esta es la mia)
-	MsgTypeData          uint8 = 0x03 // Tráfico VPN Cifrado
+	MsgTypeHandshakeInit  uint8 = 0x01 // Cliente -> Servidor (Hola, esta es mi PubKey)
+	MsgTypeHandshakeResp  uint8 = 0x02 // Servidor -> Cliente (Hola, esta es la mia)
+	MsgTypeData           uint8 = 0x03 // Tráfico VPN Cifrado
+	MsgTypeCookieReply    uint8 = 0x04 // Servidor -> Cliente (Estás rate-limited, usa esta cookie)
 )
 
 var (
@@ -55,3 +56,4 @@ func ParseHeader(src []byte) (msgType uint8, sessionID uint32, nonce []byte, pay
 
 	return msgType, sessionID, nonce, payload, nil
 }
+

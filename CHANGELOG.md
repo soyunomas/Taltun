@@ -2,6 +2,55 @@
 
 Todos los cambios notables en el proyecto Taltun serán documentados en este archivo.
 
+## [v0.10.0] - Internal Switching & Relay (Fase 10)
+### 🔀 Advanced Routing (Routing V2)
+- **Radix Trie (LPM):** Reemplazo del mapa plano `map[uint32]*Peer` por una estructura de datos de árbol (`Radix Tree`) optimizada para IPv4. Permite búsquedas de prefijos CIDR (Longest Prefix Match), habilitando arquitecturas **Site-to-Site** donde un peer da acceso a toda una subred (ej. `192.168.1.0/24`).
+- **User-Space Relay (Hairpinning):** Implementación de lógica de conmutación interna. Si un paquete recibido por el servidor tiene como destino otro peer conectado, Taltun lo re-encripta y reenvía directamente en el espacio de usuario.
+    - Evita el coste de cambios de contexto (TUN Write -> Kernel Routing -> TUN Read).
+    - Permite comunicación **Client-to-Client** sin necesidad de configurar `ip forwarding` o `iptables` en el host.
+- **AllowedIPs:** Nueva directiva de configuración para definir qué rangos de IP (CIDRs) se permiten y enrutan a través de cada peer.
+
+---
+
+## [v0.9.1] - Security Hardening (Fase 9)
+### 🛡️ Seguridad y Resiliencia
+- **Anti-Replay Protection:** Implementación de ventana deslizante de 2048 bits (RFC 6479) para rechazar paquetes duplicados o reinyectados con coste O(1).
+- **DoS Protection (Stateless Cookies):** Mecanismo de defensa contra inundación de Handshakes. Bajo carga, el servidor exige a los clientes una prueba criptográfica (Cookie HMAC) vinculada a su IP antes de realizar operaciones costosas (Curve25519).
+- **Graceful Rekeying:** Rotación automática de claves de sesión cada 2 minutos para garantizar *Perfect Forward Secrecy* (PFS). Soporte para descifrado transicional (Current/Prev Key) para evitar pérdida de paquetes durante el cambio.
+
+### 💓 Conectividad
+- **Keepalives:** Envío automático de `Heartbeats` (paquetes vacíos cifrados) cada 10 segundos de inactividad para mantener abiertas las tablas NAT/Firewalls intermedios.
+- **Dead Peer Detection:** Actualización de timestamps de última actividad (RX/TX) para gestión de estado de conexión.
+
+---
+
+## [v0.9.0] - Modern TUN & GSO (Fase 9)
+### 🚀 Core Engine
+- **WireGuard TUN:** Reemplazo de `songgao/water` por la implementación estándar industrial `wireguard-go/tun`. Habilita soporte nativo para **GSO (Generic Segmentation Offload)** y **GRO**, permitiendo al Kernel entregar "super-paquetes" de hasta 64KB reduciendo la sobrecarga de interrupciones.
+- **TUN Vectorized I/O:** Implementación de lectura por lotes desde la interfaz virtual (`tun.ReadBatch`). El motor ahora lee múltiples paquetes IP del Kernel en una sola llamada al sistema, alineándose con la optimización de UDP `recvmmsg` ya existente.
+- **Zero-Copy Header Prepend:** Uso de *Offset Reads* para reservar espacio de cabecera (`Headroom`) en el buffer antes de leer del Kernel. Permite encapsular el paquete IP sin mover la memoria (`memcpy` eliminado en el path crítico de TX).
+
+### ⚡ Concurrency & Latency (Engineering Refinements)
+- **Lock-Free Dataplane:** Eliminación de `sync.RWMutex` en el path crítico de lectura (RX/TX) mediante el patrón **Copy-On-Write** con `atomic.Pointer`. Elimina la contención de bloqueos en cargas de trabajo multicore.
+- **Memory Layout Optimization:** Reestructuración del objeto `Peer` con **Memory Padding** (128 bytes) para aislar contadores atómicos y evitar *False Sharing* (Cache Line bouncing) entre hilos.
+- **Batch Channeling:** El canal de transmisión ahora transporta punteros a lotes de paquetes (`*TxBatch`) en lugar de paquetes individuales. Reduce la sobrecarga de sincronización de canales y del Scheduler de Go en un factor de 64x.
+
+### 🛠 Compatibilidad
+- **Multi-Platform Ready:** La adopción de la librería de WireGuard prepara el terreno para soporte nativo de alto rendimiento en Windows (Wintun) y macOS (Utun) en futuras versiones.
+
+---
+
+## [v0.8.0] - Usability & Automation (Fase 8)
+### 🛠 Usabilidad y Sistema
+- **Zero-Config Start:** Automatización completa de la configuración de red (IP/MTU) mediante interacción directa con el Kernel (Netlink). Elimina la necesidad de scripts `ip addr add` manuales.
+- **Configuración Estructurada:** Soporte híbrido para archivos `config.toml` y Flags. Implementado con `go-toml/v2` para evitar overhead de reflexión y mantener el binario ligero.
+- **Graceful Shutdown:** Manejo robusto de señales (`SIGINT`, `SIGTERM`) para garantizar el cierre limpio de sockets y descriptores de archivo, evitando corrupción de datos o estados inconsistentes en la interfaz TUN.
+
+### ⚡ Rendimiento
+- **Cold Path Isolation:** Toda la lógica de parsing y configuración se ejecuta estrictamente antes de iniciar el motor. El *hot-path* (ciclo de transmisión) permanece intocado, manteniendo el rendimiento de **~940 Mbps**.
+
+---
+
 ## [v0.7.0] - TX Batching & RX Caching (Fase 7)
 ### 🚀 Mejoras de Rendimiento
 - **TX Vectorized I/O:** Implementación de escritura por lotes (`WriteBatch/sendmmsg`) en la ruta de transmisión (TUN -> UDP).

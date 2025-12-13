@@ -6,15 +6,15 @@ import (
 )
 
 const (
-	HandshakeSize = 37 // 1 Type + 4 SenderIndex + 32 PubKey
+	HandshakeBaseSize = 37 // 1 Type + 4 SenderIndex + 32 PubKey
+	CookieSize        = 16 // HMAC-MD5 o Blake2s truncado (suficiente para DoS protection)
 )
 
 // EncodeHandshake serializa un mensaje de inicio de conexión.
-// type: Init o Resp
-// localIndex: El ID de sesión que el remitente quiere usar (para recibir).
-// pubKey: La clave pública efímera (32 bytes).
-func EncodeHandshake(dst []byte, msgType uint8, localIndex uint32, pubKey []byte) (int, error) {
-	if len(dst) < HandshakeSize {
+// Soporta un campo opcional 'cookie' para protección DoS.
+func EncodeHandshake(dst []byte, msgType uint8, localIndex uint32, pubKey []byte, cookie []byte) (int, error) {
+	requiredSize := HandshakeBaseSize + len(cookie)
+	if len(dst) < requiredSize {
 		return 0, errors.New("buffer too small")
 	}
 	if len(pubKey) != 32 {
@@ -25,18 +25,46 @@ func EncodeHandshake(dst []byte, msgType uint8, localIndex uint32, pubKey []byte
 	binary.BigEndian.PutUint32(dst[1:5], localIndex)
 	copy(dst[5:37], pubKey)
 
-	return HandshakeSize, nil
+	// Si hay cookie, la adjuntamos al final
+	if len(cookie) > 0 {
+		copy(dst[37:], cookie)
+	}
+
+	return requiredSize, nil
 }
 
 // ParseHandshake decodifica el mensaje.
-func ParseHandshake(src []byte) (senderIndex uint32, pubKey []byte, err error) {
-	if len(src) < HandshakeSize {
-		return 0, nil, errors.New("packet too small for handshake")
+// Retorna la cookie si está presente en el paquete.
+func ParseHandshake(src []byte) (senderIndex uint32, pubKey []byte, cookie []byte, err error) {
+	if len(src) < HandshakeBaseSize {
+		return 0, nil, nil, errors.New("packet too small for handshake")
 	}
 	
-	// Byte 0 es Type (ya leído fuera)
 	senderIndex = binary.BigEndian.Uint32(src[1:5])
 	pubKey = src[5:37] // Zero-copy view
 	
-	return senderIndex, pubKey, nil
+	if len(src) >= HandshakeBaseSize+CookieSize {
+		cookie = src[37 : 37+CookieSize]
+	}
+	
+	return senderIndex, pubKey, cookie, nil
+}
+
+// EncodeCookieReply crea el paquete de respuesta de cookie.
+// Estructura: Type (1) + Cookie (16)
+func EncodeCookieReply(dst []byte, cookie []byte) (int, error) {
+	if len(dst) < 1+len(cookie) {
+		return 0, errors.New("buffer too small for cookie reply")
+	}
+	dst[0] = MsgTypeCookieReply
+	copy(dst[1:], cookie)
+	return 1 + len(cookie), nil
+}
+
+// ParseCookieReply extrae la cookie de un paquete de respuesta.
+func ParseCookieReply(src []byte) ([]byte, error) {
+	if len(src) < 1+CookieSize {
+		return nil, errors.New("packet too small for cookie reply")
+	}
+	return src[1 : 1+CookieSize], nil
 }

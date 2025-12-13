@@ -1,0 +1,36 @@
+# Taltun Configuration File (v0.8.0)
+
+[interface]
+# mode: "client" | "server"
+mode = "client"
+
+# Nombre de la interfaz en el SO
+tun_name = "tun0"
+
+# Puerto local UDP para escuchar
+local_addr = "0.0.0.0:9000"
+
+# Tu IP Virtual dentro de la VPN
+vip = "10.0.0.2"
+
+# Tu clave privada (32 bytes Hex)
+# Generar con: openssl rand -hex 32
+private_key = "PON_TU_CLAVE_PRIVADA_AQUI"
+
+# MTU (Maximum Transmission Unit)
+mtu = 1420
+
+# Logs detallados
+debug = false
+
+# --- Definición de Peers ---
+
+# Ejemplo: Conexión al Servidor (Hub)
+[[peers]]
+vip = "10.0.0.1"
+endpoint = "203.0.113.1:9000"
+
+# Ejemplo: Otro cliente (si hubiera P2P directo o known route)
+# [[peers]]
+# vip = "10.0.0.3"
+# endpoint = "192.168.1.50:9000"

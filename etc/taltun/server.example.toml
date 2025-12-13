@@ -1,0 +1,60 @@
+# --- /etc/taltun/server.example.toml ---
+# Archivo de configuración para Servidor Taltun (Hub)
+# 
+# SEGURIDAD: Este archivo contiene la CLAVE PRIVADA.
+# Asegúrate de ejecutar: chmod 600 /etc/taltun/server.toml
+
+[interface]
+# -----------------------------------------------------------------------------
+# Configuración del Nodo Local
+# -----------------------------------------------------------------------------
+
+# Rol del nodo: 'server' espera conexiones, 'client' las inicia.
+mode = "server"
+
+# Nombre de la interfaz de red virtual que se creará en Linux.
+tun_name = "tun0"
+
+# Dirección IP y Puerto UDP donde Taltun escuchará peticiones.
+# En un servidor, esto debe ser accesible desde internet (abrir firewall).
+local_addr = "0.0.0.0:51820"
+
+# La dirección IP Virtual (VIP) de este servidor DENTRO del túnel.
+vip = "10.100.0.1"
+
+# Tu Clave Privada (32 bytes en Hexadecimal).
+# Generar con: openssl rand -hex 32
+private_key = "PON_AQUI_TU_PRIVATE_KEY_GENERADA"
+
+# MTU (Unidad Máxima de Transmisión). 
+# 1380 es un valor seguro para evitar fragmentación en redes LTE/PPPoE.
+mtu = 1380
+
+# Rutas del Sistema Operativo (Kernel Routes).
+# Taltun inyectará estas rutas en la tabla de enrutamiento de Linux al arrancar.
+# Aquí le decimos al servidor: "Todo el tráfico para la red 10.100.0.x envíalo a tun0".
+routes = ["10.100.0.0/24"]
+
+# Logs detallados (útil para debug, desactivar en producción para rendimiento).
+debug = false
+
+# -----------------------------------------------------------------------------
+# Definición de Peers (Clientes)
+# -----------------------------------------------------------------------------
+
+# --- CLIENTE 1: Portátil (Road Warrior) ---
+[[peers]]
+# La IP Virtual que le has asignado a este cliente.
+vip = "10.100.0.2"
+# Nota: No definimos 'endpoint' porque el cliente tiene IP dinámica (roaming).
+
+# --- CLIENTE 2: Oficina Remota (Site-to-Site) ---
+[[peers]]
+vip = "10.100.0.3"
+# (Opcional) Si la oficina tiene IP fija, puedes ponerla aquí para acelerar la conexión.
+# endpoint = "203.0.113.55:51820"
+
+# [AllowedIPs] - Enrutamiento Interno (Subnet Routing)
+# Importante: Aquí le decimos a Taltun: "La red 192.168.50.x está DETRÁS de este cliente".
+# Si el servidor recibe un paquete para 192.168.50.10, sabrá que debe enviárselo al 10.100.0.3.
+allowed_ips = ["192.168.50.0/24"]

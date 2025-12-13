@@ -6,9 +6,9 @@
 ![Status](https://img.shields.io/badge/Status-Beta%20%28v0.10.0%29-orange)
 ![Performance](https://img.shields.io/badge/Performance-~1Gbps-red)
 
-**Taltun** es un motor VPN de próxima generación diseñado para el rendimiento extremo y la simplicidad operativa. Escrito en Go puro, utiliza técnicas avanzadas de **Kernel Bypass** (Userspace Networking), **Vectorized I/O** y **Lock-Free Concurrency** para saturar enlaces Gigabit en hardware modesto.
+**Taltun** es un motor VPN diseñado para el rendimiento extremo y la simplicidad operativa. Escrito en Go puro, utiliza técnicas avanzadas de **Kernel Bypass** (Userspace Networking), **Vectorized I/O** y **Lock-Free Concurrency** para saturar enlaces Gigabit en hardware modesto.
 
-A diferencia de las VPNs tradicionales, Taltun opera como un **Switch Distribuido Cifrado**, permitiendo topologías Mesh, Hub & Spoke y Site-to-Site sin complejas configuraciones de firewall ni tablas de enrutamiento en el sistema operativo (gracias a su motor de Relay en espacio de usuario).
+Taltun opera como un **Switch Distribuido Cifrado**, permitiendo topologías Mesh, Hub & Spoke y Site-to-Site sin complejas configuraciones de firewall ni tablas de enrutamiento en el sistema operativo (gracias a su motor de Relay en espacio de usuario).
 
 ---
 

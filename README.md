@@ -187,9 +187,31 @@ allowed_ips = ["192.168.50.0/24"]
 vip = "10.0.0.3"
 ```
 
+---
+
 ### 2. Configuración de la OFICINA (Site Gateway)
 *   **VIP:** 10.0.0.2
-*   Este nodo debe tener habilitado `sysctl -w net.ipv4.ip_forward=1` para pasar tráfico de la VPN a la LAN física.
+*   **Rol:** Gateway. Recibe tráfico de la VPN y lo saca a la red física.
+
+⚠️ **REQUISITO CRÍTICO: NAT & Forwarding**
+Para que los dispositivos de la oficina (impresoras, servidores) sepan responder a los paquetes que vienen de la VPN, el Gateway debe hacer **NAT (Masquerade)**. De lo contrario, los dispositivos recibirán el paquete pero no sabrán cómo devolver la respuesta a la IP `10.0.0.x`.
+
+Ejecuta esto en el nodo Oficina:
+
+```bash
+# 1. Habilitar el reenvío de paquetes en el Kernel
+sudo sysctl -w net.ipv4.ip_forward=1
+
+# 2. Configurar NAT (Sustituye 'eth0' por tu interfaz física, ej: enp7s0)
+# Esto hace que el tráfico VPN parezca venir de la IP local de este PC.
+sudo iptables -t nat -A POSTROUTING -o eth0 -s 10.0.0.0/24 -j MASQUERADE
+
+# 3. Permitir el paso de tráfico (Firewall)
+sudo iptables -A FORWARD -i tun0 -o eth0 -j ACCEPT
+sudo iptables -A FORWARD -i eth0 -o tun0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+```
+
+**Archivo `office.toml`:**
 
 ```toml
 # office.toml
@@ -205,9 +227,8 @@ routes = ["10.0.0.0/24"] # Enruta tráfico VPN
 vip = "10.0.0.1"
 endpoint = "1.2.3.4:9000"
 # Definimos "0.0.0.0/0" si queremos que TODA la red VPN sea accesible via el Hub
-# Ojo: No ponemos allowed_ips complejos aquí, el trabajo duro lo hace el Hub.
+allowed_ips = ["10.0.0.0/24"]
 ```
-
 ### 3. Configuración del EMPLEADO (Road Warrior)
 *   **VIP:** 10.0.0.3
 
@@ -227,7 +248,7 @@ vip = "10.0.0.1"
 endpoint = "1.2.3.4:9000"
 # Le decimos al motor Taltun del empleado: 
 # "Si envías algo a la 192.168.50.x, envíaselo a este Peer (al Hub)"
-allowed_ips = ["192.168.50.0/24"]
+allowed_ips = ["192.168.50.0/24","10.0.0.0/24"]
 ```
 
 ### 🎯 Resultado

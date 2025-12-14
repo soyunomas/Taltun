@@ -47,28 +47,50 @@ func (e *Engine) sendKeepalive(p *PeerInfo) {
 	}
 
 	pkt := pool.Get()
-	defer pool.Put(pkt)
-
+	
 	// OPTIMIZACION (STACK)
 	var nonceArr [protocol.NonceSize]byte
 	nonceBuf := nonceArr[:]
 	
+	// Nonce Random Prefix + Counter
 	copy(nonceBuf[0:4], []byte{0xCA, 0xFE, 0xBA, 0xBE})
 	ctr := atomic.AddUint64(&e.txCounter, 1)
 	binary.BigEndian.PutUint64(nonceBuf[4:], ctr)
 
 	protocol.EncodeDataHeader(pkt[:], e.localVIP, nonceBuf)
 	
+	// Payload vacío para Keepalive
 	encrypted := aead.Seal(pkt[protocol.HeaderSize:protocol.HeaderSize], nonceBuf, nil, nil)
 	totalLen := protocol.HeaderSize + len(encrypted)
 
-	if len(e.rawConns) > 0 {
-		e.rawConns[0].WriteToUDP(pkt[:totalLen], endpoint)
-		p.UpdateTimestamps(false)
+	p.UpdateTimestamps(false)
+
+	// CAMBIO CRÍTICO: Enviar via Batch Channel en lugar de Syscall directa.
+	// Esto permite que dataplane_tx agrupe este paquete con otros de datos.
+	req := txRequest{
+		Data: pkt[:totalLen],
+		Buff: pkt, // Pasamos ownership del buffer al worker TX
+		Addr: endpoint,
+	}
+
+	// Obtener un Batch nuevo o reusado (Single Packet Batch para control es aceptable)
+	// Idealmente dataplane_tx agregaría, pero aquí forzamos inyección.
+	newBatch := txBatchPool.Get().(*TxBatch)
+	newBatch.Reqs[0] = req
+	newBatch.Len = 1
+
+	select {
+	case e.txCh <- newBatch:
+		// Enviado al worker TX
+	default:
+		// Si el canal está lleno (congestión), descartamos el Keepalive.
+		// Es mejor perder un keepalive que bloquear el housekeeping o allocar memoria infinita.
+		pool.Put(pkt)
+		txBatchPool.Put(newBatch)
 	}
 }
 
-// --- HANDSHAKE PROTOCOL ---
+// --- HANDSHAKE PROTOCOL (Sin cambios mayores, usa UDP directo por baja frecuencia) ---
 
 func (e *Engine) handshakeWorker() {
 	for req := range e.handshakeCh {

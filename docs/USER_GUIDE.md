@@ -107,7 +107,6 @@ openssl rand -hex 32
 >
 > *Copia esta cadena. La necesitarás para el parámetro `private_key` en el siguiente paso.*
 
-```bash
 # --- BLOQUE LOCAL (Tu Identidad) ---
 [interface]
 mode = "client"                  # Rol: 'client' (inicia) o 'server' (escucha)
@@ -129,7 +128,7 @@ endpoint = "203.0.113.1:9000"    # IP Pública:Puerto (Opcional si eres server)
 # ¿Qué tráfico se permite venir de este peer?
 # ¿Hacia qué IPs detrás de este peer debemos enviar tráfico?
 allowed_ips = ["10.0.0.0/24", "192.168.1.0/24"]
-```
+
 ## 2. Arquitectura de Configuración
 
 Taltun se configura mediante un único archivo TOML (por defecto `config.toml`). Entender la lógica de este archivo es fundamental para desplegar topologías complejas.
@@ -178,9 +177,9 @@ Es crucial distinguir entre las dos capas de direccionamiento:
     *   **En Clientes:** Debes especificar el endpoint del Servidor para saber dónde llamar.
     *   **En Servidores:** Generalmente se deja vacío. El servidor "aprende" dinámicamente el endpoint del cliente cuando recibe el primer paquete autenticado válido (Roaming).
 
-### 2.3. Lógica de Enrutamiento
+### 2.3. Lógica de Enrutamiento v0.10
 
-Hay una distinción estricta entre enrutamiento del OS y enrutamiento interno del motor.
+La versión 0.10 introduce una distinción estricta entre enrutamiento del OS y enrutamiento interno del motor.
 
 #### A. `routes` (Configuración del Sistema Operativo)
 *   **Dónde:** Bloque `[interface]`.
@@ -326,41 +325,25 @@ allowed_ips = ["0.0.0.0/0"]
 
 ### 3.4. Escenario D: Site-to-Site (LAN Extension)
 
-Este es el escenario más avanzado, posible gracias al nuevo motor de enrutamiento de Taltun v0.10. Permite unir dos redes locales completas (LANs) a través de internet de forma transparente.
+Este es el escenario más avanzado, posible gracias al nuevo motor de enrutamiento de Taltun v0.10. Permite unir dos redes locales completas (LANs) a través de internet de forma transparente, sin que los dispositivos individuales necesiten instalar el software VPN.
 
 **Casos de Uso Típicos:**
 *   **Conexión Oficina-Nube:** Los servidores web en AWS (`10.0.0.x`) pueden imprimir facturas directamente en la impresora de red de la oficina física (`192.168.50.100`).
-*   **Sucursales Interconectadas:** La sede de Madrid y la de Barcelona se ven entre sí.
-*   **Acceso a IoT:** Monitorizar cámaras IP o PLCs industriales remotos sin exponerlos a internet.
+*   **Sucursales Interconectadas:** La sede de Madrid (`192.168.10.x`) y la de Barcelona (`192.168.20.x`) se ven entre sí como si estuvieran en el mismo edificio. Un usuario en Madrid puede acceder a una carpeta compartida en un NAS situado en Barcelona.
+*   **Acceso a Dispositivos IoT:** Un administrador puede acceder a cámaras IP, PLCs industriales o sensores domóticos en una ubicación remota (`192.168.1.x`) desde su central de monitorización, sin exponer esos dispositivos a internet.
 
 **Topología:**
-*   **Gateway Oficina:** IP LAN `192.168.50.5` (`eth0`). IP VPN `10.0.0.2` (`tun0`).
+*   **Gateway Oficina:** IP LAN `192.168.50.5`. IP VPN `10.0.0.2`.
 *   **Gateway Nube (Hub):** IP VPN `10.0.0.1`.
 *   **Red Objetivo:** `192.168.50.0/24` (Ubicada físicamente detrás del Gateway Oficina).
 
-**Requisito Previo en Gateway Oficina:**
-Al actuar como Router entre la VPN y la LAN, debe tener activado el NAT y el Forwarding.
-
-```bash
-# 1. Habilitar Forwarding
-sysctl -w net.ipv4.ip_forward=1
-
-# 2. Configurar NAT (Masquerade)
-# "Lo que salga por eth0 viniendo de la VPN, enmascáralo con la IP de la oficina"
-# (Cambia 'eth0' por el nombre de tu interfaz física real)
-iptables -t nat -A POSTROUTING -o eth0 -s 10.0.0.0/24 -j MASQUERADE
-
-# 3. Permitir el paso de tráfico (Firewall)
-iptables -A FORWARD -i tun0 -o eth0 -j ACCEPT
-iptables -A FORWARD -i eth0 -o tun0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-```
-
-**Configuración Gateway Oficina (`office.toml`)**
+**1. Configuración Gateway Oficina (`office.toml`)**
+Este equipo actúa como puente. Debe tener `net.ipv4.ip_forward=1` activado en Linux.
 ```toml
 [interface]
 mode = "client"
 vip = "10.0.0.2"
-routes = ["10.0.0.0/24"] # Ruta para volver a la Nube
+routes = ["10.0.0.0/24"] # Ruta para que la LAN sepa volver a la Nube
 
 [[peers]]
 vip = "10.0.0.1" # Gateway Nube
@@ -368,19 +351,21 @@ endpoint = "CLOUD_IP:9000"
 allowed_ips = ["10.0.0.0/24"]
 ```
 
-**Configuración Gateway Nube (`cloud.toml`)**
+**2. Configuración Gateway Nube (`cloud.toml`)**
+El Hub debe saber enrutar el tráfico hacia la subred de la oficina.
 ```toml
 [interface]
 mode = "server"
 vip = "10.0.0.1"
-# OS Routing: "Kernel, si llega algo para 192.168.50.x, tíralo al túnel"
+# OS Routing: "Kernel, si llega algo para 192.168.50.x, tíralo al túnel tun0"
 routes = ["192.168.50.0/24"] 
 
 [[peers]]
 vip = "10.0.0.2"
-# Engine Routing: "Motor Taltun, lo que sea para 192.168.50.x es para este peer"
+# Engine Routing: "Motor Taltun, si llega algo para 192.168.50.x, envíaselo al peer 10.0.0.2"
 allowed_ips = ["192.168.50.0/24"]
 ```
+
 **3. Configuración de Red (NAT) en Gateway Oficina**
 Para que los dispositivos de la oficina (impresoras, cámaras) sepan responder a las peticiones que vienen de la VPN sin cambiar su puerta de enlace por defecto, el Gateway debe enmascarar el tráfico (Source NAT).
 

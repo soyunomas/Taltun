@@ -107,6 +107,7 @@ openssl rand -hex 32
 >
 > *Copia esta cadena. La necesitarás para el parámetro `private_key` en el siguiente paso.*
 
+```bash
 # --- BLOQUE LOCAL (Tu Identidad) ---
 [interface]
 mode = "client"                  # Rol: 'client' (inicia) o 'server' (escucha)
@@ -128,7 +129,7 @@ endpoint = "203.0.113.1:9000"    # IP Pública:Puerto (Opcional si eres server)
 # ¿Qué tráfico se permite venir de este peer?
 # ¿Hacia qué IPs detrás de este peer debemos enviar tráfico?
 allowed_ips = ["10.0.0.0/24", "192.168.1.0/24"]
-
+```
 ## 2. Arquitectura de Configuración
 
 Taltun se configura mediante un único archivo TOML (por defecto `config.toml`). Entender la lógica de este archivo es fundamental para desplegar topologías complejas.
@@ -177,9 +178,9 @@ Es crucial distinguir entre las dos capas de direccionamiento:
     *   **En Clientes:** Debes especificar el endpoint del Servidor para saber dónde llamar.
     *   **En Servidores:** Generalmente se deja vacío. El servidor "aprende" dinámicamente el endpoint del cliente cuando recibe el primer paquete autenticado válido (Roaming).
 
-### 2.3. Lógica de Enrutamiento v0.10
+### 2.3. Lógica de Enrutamiento
 
-La versión 0.10 introduce una distinción estricta entre enrutamiento del OS y enrutamiento interno del motor.
+Hay una distinción estricta entre enrutamiento del OS y enrutamiento interno del motor.
 
 #### A. `routes` (Configuración del Sistema Operativo)
 *   **Dónde:** Bloque `[interface]`.

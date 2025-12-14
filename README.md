@@ -9,7 +9,7 @@
 
 > **¿Te da pereza configurar archivos a mano?** Usa nuestro [Generador de Configuración Web](https://soyunomas.github.io/Taltun/). Genera claves y archivos listos para copiar y pegar de forma segura (todo se ejecuta localmente en tu navegador).
 
-**Taltun** es un motor VPN de próxima generación diseñado para el rendimiento extremo y la simplicidad operativa. Escrito en Go puro, utiliza técnicas avanzadas de **Kernel Bypass** (Userspace Networking), **Vectorized I/O** y **Lock-Free Concurrency** para saturar enlaces Gigabit en hardware modesto.
+**Taltun** es un motor VPN diseñado para el rendimiento extremo y la simplicidad operativa. Escrito en Go puro, utiliza técnicas avanzadas de **Kernel Bypass** (Userspace Networking), **Vectorized I/O** y **Lock-Free Concurrency** para saturar enlaces Gigabit en hardware modesto.
 
 A diferencia de las VPNs tradicionales, Taltun opera como un **Switch Distribuido Cifrado**, permitiendo topologías Mesh, Hub & Spoke y Site-to-Site sin complejas configuraciones de firewall ni tablas de enrutamiento en el sistema operativo (gracias a su motor de Relay en espacio de usuario).
 

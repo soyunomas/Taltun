@@ -10,6 +10,10 @@ Todos los cambios notables en el proyecto Taltun serán documentados en este arc
     - Permite comunicación **Client-to-Client** sin necesidad de configurar `ip forwarding` o `iptables` en el host.
 - **AllowedIPs:** Nueva directiva de configuración para definir qué rangos de IP (CIDRs) se permiten y enrutan a través de cada peer.
 
+### 🏗️ Engineering Refinements
+- **Stack Allocation Optimization:** Eliminación de asignaciones en el Heap (`mallocgc`) para los buffers criptográficos (Nonce) en el ciclo de transmisión crítico. Reduce drásticamente la presión sobre el Garbage Collector bajo carga alta.
+- **Engine Modularization:** Refactorización del núcleo monolítico en unidades lógicas (`dataplane_rx`, `dataplane_tx`, `control`, `types`) para mejorar la mantenibilidad y legibilidad del código base.
+
 ---
 
 ## [v0.9.1] - Security Hardening (Fase 9)

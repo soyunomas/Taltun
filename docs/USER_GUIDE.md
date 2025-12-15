@@ -1,6 +1,6 @@
-# 📘 Manual de Operaciones Taltun v0.10.0
+# 📘 Manual de Operaciones Taltun v0.11.0
 
-Este documento detalla la instalación, configuración y despliegue de Taltun en diferentes topologías de red, aprovechando las nuevas capacidades de enrutamiento y relay de la versión 0.10.0.
+Este documento detalla la instalación, configuración y despliegue de Taltun en diferentes topologías de red, aprovechando las nuevas capacidades de enrutamiento y relay de la versión 0.11.0.
 
 ## 📑 Índice de Contenidos
 

@@ -17,6 +17,7 @@ import (
 // --- HOUSEKEEPING (Rekey + Keepalives) ---
 
 func (e *Engine) housekeepingWorker(ctx context.Context) error {
+	// Aumentamos frecuencia para asegurar NAT traversal agresivo
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -31,7 +32,8 @@ func (e *Engine) housekeepingWorker(ctx context.Context) error {
 					p.MarkHandshakePending()
 					e.sendHandshakeInit(p)
 				}
-				if p.NeedsKeepalive() {
+				// Keepalive agresivo si el peer tiene endpoint (crucial para Lighthouse)
+				if p.GetEndpoint() != nil && p.NeedsKeepalive() {
 					e.sendKeepalive(p)
 				}
 			}
@@ -48,49 +50,39 @@ func (e *Engine) sendKeepalive(p *PeerInfo) {
 
 	pkt := pool.Get()
 	
-	// OPTIMIZACION (STACK)
 	var nonceArr [protocol.NonceSize]byte
 	nonceBuf := nonceArr[:]
 	
-	// Nonce Random Prefix + Counter
 	copy(nonceBuf[0:4], []byte{0xCA, 0xFE, 0xBA, 0xBE})
 	ctr := atomic.AddUint64(&e.txCounter, 1)
 	binary.BigEndian.PutUint64(nonceBuf[4:], ctr)
 
 	protocol.EncodeDataHeader(pkt[:], e.localVIP, nonceBuf)
 	
-	// Payload vacío para Keepalive
 	encrypted := aead.Seal(pkt[protocol.HeaderSize:protocol.HeaderSize], nonceBuf, nil, nil)
 	totalLen := protocol.HeaderSize + len(encrypted)
 
 	p.UpdateTimestamps(false)
 
-	// CAMBIO CRÍTICO: Enviar via Batch Channel en lugar de Syscall directa.
-	// Esto permite que dataplane_tx agrupe este paquete con otros de datos.
 	req := txRequest{
 		Data: pkt[:totalLen],
-		Buff: pkt, // Pasamos ownership del buffer al worker TX
+		Buff: pkt, 
 		Addr: endpoint,
 	}
 
-	// Obtener un Batch nuevo o reusado (Single Packet Batch para control es aceptable)
-	// Idealmente dataplane_tx agregaría, pero aquí forzamos inyección.
 	newBatch := txBatchPool.Get().(*TxBatch)
 	newBatch.Reqs[0] = req
 	newBatch.Len = 1
 
 	select {
 	case e.txCh <- newBatch:
-		// Enviado al worker TX
 	default:
-		// Si el canal está lleno (congestión), descartamos el Keepalive.
-		// Es mejor perder un keepalive que bloquear el housekeeping o allocar memoria infinita.
 		pool.Put(pkt)
 		txBatchPool.Put(newBatch)
 	}
 }
 
-// --- HANDSHAKE PROTOCOL (Sin cambios mayores, usa UDP directo por baja frecuencia) ---
+// --- HANDSHAKE PROTOCOL ---
 
 func (e *Engine) handshakeWorker() {
 	for req := range e.handshakeCh {
@@ -122,9 +114,32 @@ func (e *Engine) processHandshake(req HandshakeRequest) {
 	}
 
 	peer.SetSessionKey(sessionAEAD)
-	peer.SetEndpoint(req.RemoteAddr)
 	
-	log.Printf("🔐 Handshake Completado con %s (%s)", netutil.Uint32ToIP(senderVIP), req.RemoteAddr)
+	// ACTUALIZACIÓN DE ENDPOINT & RUTA (Hole Punching Success)
+	prevEndpoint := peer.GetEndpoint()
+	newEndpoint := req.RemoteAddr
+	
+	// Si el endpoint ha cambiado (o es el primero que descubrimos), actualizamos
+	updateRoute := false
+	if prevEndpoint == nil {
+		updateRoute = true
+	} else if !prevEndpoint.IP.Equal(newEndpoint.IP) || prevEndpoint.Port != newEndpoint.Port {
+		updateRoute = true
+	}
+
+	if updateRoute {
+		peer.SetEndpoint(newEndpoint)
+		// ¡IMPORTANTE! Promocionamos la ruta directa.
+		// Esto activa el tráfico P2P directo y deja de usar el Relay del Faro.
+		e.PromotePeerRoute(peer)
+		
+		if e.cfg.Debug {
+			log.Printf("✨ Ruta Directa Establecida: %s -> %s (P2P)", 
+				netutil.Uint32ToIP(senderVIP), newEndpoint)
+		}
+	} else {
+		log.Printf("🔐 Handshake Renovado con %s", netutil.Uint32ToIP(senderVIP))
+	}
 
 	if req.Packet[0] == protocol.MsgTypeHandshakeInit {
 		e.sendHandshakeResp(peer, req.RemoteAddr)

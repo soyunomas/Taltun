@@ -17,6 +17,7 @@ const (
 	MsgTypeHandshakeResp  uint8 = 0x02 // Servidor -> Cliente (Hola, esta es la mia)
 	MsgTypeData           uint8 = 0x03 // Tráfico VPN Cifrado
 	MsgTypeCookieReply    uint8 = 0x04 // Servidor -> Cliente (Estás rate-limited, usa esta cookie)
+	MsgTypePeerUpdate     uint8 = 0x05 // Faro -> Cliente (El peer X ha cambiado de IP/Puerto)
 )
 
 var (
@@ -47,8 +48,8 @@ func ParseHeader(src []byte) (msgType uint8, sessionID uint32, nonce []byte, pay
 
 	msgType = src[0]
 	// Para paquetes Data, leemos Session y Nonce.
-	// Para Handshake, el formato será distinto (Type + Payload), pero
-	// podemos reutilizar el parsing básico y luego interpretar el payload según el Type.
+	// Para Handshake y Control, el formato es distinto y se parsea en su módulo específico,
+	// pero ParseHeader sirve para identificar el tipo (byte 0).
 	
 	sessionID = binary.BigEndian.Uint32(src[1:5])
 	nonce = src[5:17]
@@ -56,4 +57,3 @@ func ParseHeader(src []byte) (msgType uint8, sessionID uint32, nonce []byte, pay
 
 	return msgType, sessionID, nonce, payload, nil
 }
-

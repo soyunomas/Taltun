@@ -31,10 +31,8 @@ type Engine struct {
 	staticKey *crypto.KeyPair
 	localVIP  uint32
 
-	// Protection Modules
 	cookieProtector *cookie.Protector
 
-	// Routing & Peering
 	peers        atomic.Pointer[PeerMap]
 	router       *router.Router 
 	peersWriteMu sync.Mutex
@@ -99,7 +97,11 @@ func (e *Engine) AddPeer(virtualIP net.IP, remoteAddr string, allowedIPs []strin
 	newMap[vip] = p
 	e.peers.Store(&newMap)
 
-	e.router.Insert(fmt.Sprintf("%s/32", virtualIP.String()), p)
+	if udpAddr != nil {
+		e.router.Insert(fmt.Sprintf("%s/32", virtualIP.String()), p)
+	} else {
+		log.Printf("⏳ Peer %s añadido sin endpoint (Esperando descubrimiento)", virtualIP)
+	}
 
 	for _, cidr := range allowedIPs {
 		if err := e.router.Insert(cidr, p); err != nil {
@@ -109,31 +111,46 @@ func (e *Engine) AddPeer(virtualIP net.IP, remoteAddr string, allowedIPs []strin
 		}
 	}
 
-	log.Printf("🔗 Peer Configurado: VIP=%s Endpoint=%v AllowedIPs=%d", virtualIP, remoteAddr, len(allowedIPs))
 	return nil
 }
 
+func (e *Engine) PromotePeerRoute(p *session.Peer) {
+	vip := netutil.Uint32ToIP(p.VirtualIP)
+	cidr := fmt.Sprintf("%s/32", vip.String())
+	e.router.Insert(cidr, p)
+	if e.cfg.Debug {
+		log.Printf("🚀 Ruta Directa Promocionada: %s -> %s", cidr, p.GetEndpoint())
+	}
+}
+
 func (e *Engine) Initialize() error {
-	dev, err := tun.CreateTUN(e.cfg.TunName, e.cfg.MTU)
-	if err != nil {
-		return fmt.Errorf("error creando TUN: %v", err)
-	}
-	e.ifce = dev
-
-	ip := netutil.Uint32ToIP(e.localVIP)
-	log.Printf("🔧 Configurando Interfaz %s: IP=%s/24 MTU=%d", e.cfg.TunName, ip, e.cfg.MTU)
-	
-	if err := netutil.AssignIP(e.cfg.TunName, ip); err != nil {
-		dev.Close()
-		return fmt.Errorf("fallo asignando IP: %v", err)
-	}
-
-	if len(e.cfg.Routes) > 0 {
-		log.Printf("🛣️  Añadiendo rutas estáticas locales: %v", e.cfg.Routes)
-		if err := netutil.AddRoutes(e.cfg.TunName, e.cfg.Routes); err != nil {
-			dev.Close()
-			return fmt.Errorf("fallo añadiendo rutas: %v", err)
+	// OPTIMIZACIÓN LIGHTHOUSE:
+	// Si somos Lighthouse puro, no necesitamos interfaz TUN ni IPs del sistema.
+	// Solo sockets UDP.
+	if e.cfg.Mode != "lighthouse" {
+		dev, err := tun.CreateTUN(e.cfg.TunName, e.cfg.MTU)
+		if err != nil {
+			return fmt.Errorf("error creando TUN: %v", err)
 		}
+		e.ifce = dev
+
+		ip := netutil.Uint32ToIP(e.localVIP)
+		log.Printf("🔧 Configurando Interfaz %s: IP=%s/24 MTU=%d", e.cfg.TunName, ip, e.cfg.MTU)
+		
+		if err := netutil.AssignIP(e.cfg.TunName, ip); err != nil {
+			dev.Close()
+			return fmt.Errorf("fallo asignando IP: %v", err)
+		}
+
+		if len(e.cfg.Routes) > 0 {
+			log.Printf("🛣️  Añadiendo rutas estáticas locales: %v", e.cfg.Routes)
+			if err := netutil.AddRoutes(e.cfg.TunName, e.cfg.Routes); err != nil {
+				dev.Close()
+				return fmt.Errorf("fallo añadiendo rutas: %v", err)
+			}
+		}
+	} else {
+		log.Println("💡 Iniciando en modo LIGHTHOUSE (Sin interfaz TUN)")
 	}
 
 	numCPU := runtime.NumCPU()
@@ -145,7 +162,7 @@ func (e *Engine) Initialize() error {
 	for i := 0; i < numCPU; i++ {
 		c, err := netutil.ListenUDPReusePort("udp", e.cfg.LocalAddr)
 		if err != nil {
-			dev.Close()
+			if e.ifce != nil { e.ifce.Close() }
 			return fmt.Errorf("error binding socket %d: %v", i, err)
 		}
 		e.rawConns[i] = c
@@ -159,7 +176,7 @@ func (e *Engine) Close() {
 	if e.closed.Swap(true) {
 		return
 	}
-	log.Println("🛑 Cerrando recursos (TUN/UDP)...")
+	log.Println("🛑 Cerrando recursos...")
 	
 	for _, c := range e.rawConns {
 		c.Close()
@@ -171,8 +188,14 @@ func (e *Engine) Close() {
 }
 
 func (e *Engine) Run(ctx context.Context) error {
-	errChan := make(chan error, len(e.pconns)+3)
+	// Si es lighthouse, solo necesitamos workers que procesen UDP -> Lógica
+	// No necesitamos TunRead (porque no hay TUN) ni TunWrite (porque no hay TUN).
+	
+	numWorkers := len(e.pconns)
+	// Canales de error + workers extra
+	errChan := make(chan error, numWorkers + 5)
 
+	// 1. RX Workers (UDP Input)
 	for i, pc := range e.pconns {
 		idx := i
 		pconn := pc
@@ -181,19 +204,28 @@ func (e *Engine) Run(ctx context.Context) error {
 		}()
 	}
 
-	go func() { errChan <- e.loopTunReadAndEncrypt() }()
+	// 2. TX Worker (UDP Output)
 	go func() { errChan <- e.loopUdpBatchWrite() }()
-	go func() { errChan <- e.housekeepingWorker(ctx) }() 
 	
+	// 3. Control Plane
+	go func() { errChan <- e.housekeepingWorker(ctx) }() 
 	go e.handshakeWorker()
 
-	log.Printf("🚀 Engine Running (ROUTING V2): %d Cores | VIP: %s", 
-		len(e.pconns), e.cfg.LocalVIP)
+	// 4. TUN Reader (Solo si NO es Lighthouse)
+	if e.cfg.Mode != "lighthouse" {
+		go func() { errChan <- e.loopTunReadAndEncrypt() }()
+	}
+
+	log.Printf("🚀 Engine Running (%s): %d Cores | VIP: %s", 
+		e.cfg.Mode, numWorkers, e.cfg.LocalVIP)
 	
-	currentPeers := *e.peers.Load()
-	for _, p := range currentPeers {
-		if p.GetEndpoint() != nil {
-			go e.sendHandshakeInit(p)
+	// Handshake inicial solo si somos cliente/server normal
+	if e.cfg.Mode != "lighthouse" {
+		currentPeers := *e.peers.Load()
+		for _, p := range currentPeers {
+			if p.GetEndpoint() != nil {
+				go e.sendHandshakeInit(p)
+			}
 		}
 	}
 

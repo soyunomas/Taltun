@@ -14,7 +14,7 @@ import (
 
 // Config runtime optimizada (tipos estrictos).
 type Config struct {
-	Mode       string
+	Mode       string // client | server | lighthouse
 	LocalAddr  string
 	TunName    string
 	SecretKey  []byte
@@ -22,18 +22,15 @@ type Config struct {
 	Debug      bool
 	LocalVIP   net.IP
 	
-	// Rutas locales a inyectar en el Kernel
 	Routes []string
-
-	// Lista de peers pre-procesada para el arranque
 	Peers []PeerConfig
 }
 
 // PeerConfig define la estructura para config.toml y flags.
 type PeerConfig struct {
 	VIP        string   `toml:"vip"`
-	Endpoint   string   `toml:"endpoint"` // Opcional
-	AllowedIPs []string `toml:"allowed_ips"` // <--- NUEVO: Subredes detrás del peer
+	Endpoint   string   `toml:"endpoint"` 
+	AllowedIPs []string `toml:"allowed_ips"`
 }
 
 // fileConfig es el mapeo intermedio para TOML.
@@ -56,7 +53,7 @@ func Load() (*Config, error) {
 	// 1. Definición de Flags
 	configPath := flag.String("config", "config.toml", "Ruta al archivo de configuración")
 	
-	fMode := flag.String("mode", "", "Override: client | server")
+	fMode := flag.String("mode", "", "Override: client | server | lighthouse")
 	fLocal := flag.String("local", "", "Override: Bind Address")
 	fTun := flag.String("tun", "", "Override: Interface Name")
 	fKey := flag.String("key", "", "Override: Hex Private Key")
@@ -142,6 +139,8 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("local addr invalida: %v", err)
 	}
 
+	// Lighthouse puede operar sin VIP local en teoría pura, pero Taltun usa la VIP
+	// para firmar paquetes, así que la mantenemos obligatoria por ahora.
 	if finalVIP == "" {
 		return nil, errors.New("VIP es obligatoria (-vip o config file)")
 	}

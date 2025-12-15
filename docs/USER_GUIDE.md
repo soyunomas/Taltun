@@ -19,11 +19,13 @@ Este documento detalla la instalación, configuración y despliegue de Taltun en
     *   [3.3. Escenario C: Full Tunnel & Privacidad (Internet Exit)](#33-escenario-c-full-tunnel--privacidad-internet-exit)
     *   [3.4. Escenario D: Site-to-Site (LAN Extension)](#34-escenario-d-site-to-site-lan-extension)
     *   [3.5. Escenario E: Client-to-Client Relay](#35-escenario-e-client-to-client-relay)
+    *   [3.6. Escenario F: P2P Mesh & NAT Traversal (Lighthouse)](#36-escenario-f-p2p-mesh--nat-traversal-lighthouse)
 4.  [Puesta en Producción](#4-puesta-en-producción)
     *   [4.1. Creación de Servicio systemd](#41-creación-de-servicio-systemd)
     *   [4.2. Monitorización de Logs y Debugging](#42-monitorización-de-logs-y-debugging)
 
 ---
+
 
 ## 1. Preparación del Entorno
 
@@ -396,6 +398,89 @@ Es idéntica al **Escenario B (Road Warrior)**. No se requiere configuración es
 
 *   Ambos clientes deben tener la ruta hacia la subred VPN (`10.0.0.0/24`) en su `config.toml`.
 *   El Servidor debe tener definidos a ambos peers en su configuración.
+
+### 3.6. Escenario F: P2P Mesh & NAT Traversal (Lighthouse)
+
+Este escenario, introducido en v0.11, representa la evolución hacia una red descentralizada. Permite que dos clientes ubicados detrás de NATs restrictivos (routers domésticos, 4G, cafeterías) se conecten **directamente** entre sí, eliminando la latencia añadida de retransmitir todo por el servidor central.
+
+El servidor actúa únicamente como un "Faro" (Lighthouse) de señalización para coordinar la conexión, pero los datos viajan *Peer-to-Peer* una vez establecida la ruta.
+
+**Casos de Uso Típicos:**
+*   **Gaming de Baja Latencia:** Jugadores en distintas casas necesitan ping mínimo (<20ms). El modo Relay (Escenario E) añadiría demasiada latencia; el modo P2P es ideal.
+*   **Transferencia de Archivos Pesados:** Enviar gigabytes de video entre dos sedes remotas sin saturar el ancho de banda del servidor VPS (ahorro de costes de egress).
+*   **Reducción de Carga:** El servidor Lighthouse opera en modo ligero (sin interfaz TUN), consumiendo recursos insignificantes de CPU/RAM.
+
+**Funcionamiento Técnico (Hole Punching):**
+1.  **Cliente A** y **Cliente B** mantienen una conexión constante con el **Lighthouse**.
+2.  A intenta enviar datos a B. Inicialmente pasan por el Lighthouse (Relay).
+3.  El Lighthouse detecta el flujo y envía un mensaje `MsgTypePeerUpdate` a ambos: *"A, conecta con B en IP X"*.
+4.  A y B inician una ráfaga de Handshakes simultáneos ("UDP Hole Punching") contra las IPs públicas del otro.
+5.  Cuando los NATs se abren, Taltun promociona la ruta y el tráfico pasa a ser directo.
+
+**Topología:**
+*   **Lighthouse (VPS):** IP Pública `1.2.3.4`. VIP `10.0.0.1`.
+*   **Cliente Casa:** Detrás de NAT. VIP `10.0.0.2`.
+*   **Cliente Oficina:** Detrás de NAT. VIP `10.0.0.3`.
+
+**1. Configuración Lighthouse (`lighthouse.toml`)**
+Usamos el nuevo modo `lighthouse` que desactiva la creación de interfaz de red para máxima eficiencia.
+```toml
+[interface]
+mode = "lighthouse"              # Modo optimizado: Solo señalización y Relay
+local_addr = "0.0.0.0:9000"
+vip = "10.0.0.1"
+private_key = "KEY_LIGHTHOUSE"
+
+# No se requieren rutas del sistema operativo ni TUN
+
+[[peers]]
+vip = "10.0.0.2" # Casa
+[[peers]]
+vip = "10.0.0.3" # Oficina
+```
+
+**2. Configuración Cliente Casa (`home.toml`)**
+```toml
+[interface]
+mode = "client"
+vip = "10.0.0.2"
+private_key = "KEY_HOME"
+routes = ["10.0.0.0/24"]
+
+# Peer 1: El Faro (Gateway por defecto)
+[[peers]]
+vip = "10.0.0.1"
+endpoint = "1.2.3.4:9000"
+# CRÍTICO: keepalive mantiene el puerto NAT abierto para recibir la señal
+keepalive = true
+allowed_ips = ["10.0.0.0/24"] 
+
+# Peer 2: La Oficina (Objetivo P2P)
+[[peers]]
+vip = "10.0.0.3"
+# NOTA: No definimos 'endpoint'. 
+# Taltun aprenderá la IP real de la oficina gracias al Faro.
+# allowed_ips vacío por defecto, o explícito si queremos restringir.
+```
+
+**3. Configuración Cliente Oficina (`office.toml`)**
+Simétrica a la de Casa.
+```toml
+[interface]
+mode = "client"
+vip = "10.0.0.3"
+private_key = "KEY_OFFICE"
+routes = ["10.0.0.0/24"]
+
+[[peers]]
+vip = "10.0.0.1"
+endpoint = "1.2.3.4:9000"
+keepalive = true # Vital
+allowed_ips = ["10.0.0.0/24"]
+
+[[peers]]
+vip = "10.0.0.2" # Casa (Endpoint dinámico)
+```
 
 ## 4. Puesta en Producción
 

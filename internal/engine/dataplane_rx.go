@@ -15,7 +15,6 @@ import (
 	"golang.org/x/net/ipv4"
 )
 
-// tunBatcher encapsula el estado de escritura por lotes hacia la interfaz TUN.
 type tunBatcher struct {
 	datas [][]byte
 	refs  []*pool.Buff
@@ -32,7 +31,6 @@ func (tb *tunBatcher) add(data []byte, ref *pool.Buff) {
 		tb.refs[tb.count] = ref
 		tb.count++
 	} else {
-		// Safety fallback: si el batch explota, devolver al pool para evitar leak
 		pool.Put(ref)
 	}
 }
@@ -40,7 +38,6 @@ func (tb *tunBatcher) add(data []byte, ref *pool.Buff) {
 func (e *Engine) loopUdpBatchToTun(conn *ipv4.PacketConn, sockIdx int) error {
 	log.Printf("⚡ Batch RX Worker #%d iniciado (Optimized: TUN Write Batching)", sockIdx)
 	
-	// Estructuras de Lectura (UDP Input)
 	msgs := make([]ipv4.Message, BatchSize)
 	buffers := make([]*pool.Buff, BatchSize)
 	
@@ -49,7 +46,6 @@ func (e *Engine) loopUdpBatchToTun(conn *ipv4.PacketConn, sockIdx int) error {
 		msgs[i].Buffers = [][]byte{buffers[i][:]}
 	}
 
-	// Estructuras de Escritura (TUN Output)
 	tBatch := &tunBatcher{
 		datas: make([][]byte, BatchSize),
 		refs:  make([]*pool.Buff, BatchSize),
@@ -68,7 +64,6 @@ func (e *Engine) loopUdpBatchToTun(conn *ipv4.PacketConn, sockIdx int) error {
 			return fmt.Errorf("readbatch error: %v", err)
 		}
 
-		// 1. Procesar CPU (Desencriptar + Routing)
 		tBatch.reset()
 
 		for i := 0; i < nMsgs; i++ {
@@ -79,24 +74,30 @@ func (e *Engine) loopUdpBatchToTun(conn *ipv4.PacketConn, sockIdx int) error {
 
 			e.processOnePacket(packet, buffers[i], rAddr, sockIdx, &lastVIP, &lastPeer, tBatch)
 			
-			// Reponer buffer
 			buffers[i] = pool.Get()
 			msgs[i].Buffers[0] = buffers[i][:]
 		}
 
-		// 2. IO Burst (Escribir a TUN)
 		if tBatch.count > 0 {
-			// Write espera [][]byte. Pasamos el slice hasta count.
-			if _, err := e.ifce.Write(tBatch.datas[:tBatch.count], TunHeadroom); err != nil {
-				if e.cfg.Debug {
-					log.Printf("❌ TUN Batch Write Error: %v", err)
+			// FIX: Verificar si e.ifce existe antes de escribir (Modo Lighthouse)
+			if e.ifce != nil {
+				if _, err := e.ifce.Write(tBatch.datas[:tBatch.count], TunHeadroom); err != nil {
+					if e.cfg.Debug {
+						log.Printf("❌ TUN Batch Write Error: %v", err)
+					}
 				}
-			}
-
-			// Devolver buffers al pool tras la escritura
-			for k := 0; k < tBatch.count; k++ {
-				pool.Put(tBatch.refs[k])
-				tBatch.refs[k] = nil
+				for k := 0; k < tBatch.count; k++ {
+					pool.Put(tBatch.refs[k])
+					tBatch.refs[k] = nil
+				}
+			} else {
+				// Si no hay TUN (Lighthouse), descartamos limpiamente los paquetes de DATOS
+				// que llegaron al batch (destinados al VIP local).
+				// El Control Plane ya se procesó en processOnePacket.
+				for k := 0; k < tBatch.count; k++ {
+					pool.Put(tBatch.refs[k])
+					tBatch.refs[k] = nil
+				}
 			}
 		}
 	}
@@ -109,7 +110,7 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 	}
 	msgType := pkt[0]
 
-	// --- PATH CONTROL (Handshake / Cookie) ---
+	// --- PATH CONTROL (Handshake / Cookie / PeerUpdate) ---
 	if msgType == protocol.MsgTypeHandshakeInit || msgType == protocol.MsgTypeHandshakeResp {
 		underLoad := len(e.handshakeCh) > 250
 		
@@ -164,6 +165,23 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 		}
 		pool.Put(originalBuff)
 		return
+
+	} else if msgType == protocol.MsgTypePeerUpdate {
+		targetVIP, endpoint, err := protocol.ParsePeerUpdate(pkt)
+		if err == nil {
+			currentPeers := *e.peers.Load()
+			targetPeer := currentPeers[targetVIP]
+			
+			if targetPeer != nil {
+				if e.cfg.Debug {
+					log.Printf("💡 Faro sugiere: Peer %s está en %s. Iniciando Hole Punch...", 
+						netutil.Uint32ToIP(targetVIP), endpoint)
+				}
+				go e.sendHandshakePacket(e.localVIP, protocol.MsgTypeHandshakeInit, e.staticKey.Public[:], endpoint, targetPeer.GetCookie())
+			}
+		}
+		pool.Put(originalBuff)
+		return
 	}
 
 	// --- PATH DATA ---
@@ -202,7 +220,7 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 		return
 	}
 	
-	pool.Put(originalBuff) // Free UDP buffer
+	pool.Put(originalBuff)
 
 	if len(nonce) >= 12 {
 		counter := binary.BigEndian.Uint64(nonce[4:12])
@@ -212,7 +230,6 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 		}
 	}
 
-	// Endpoint update logic
 	currentEP := peer.GetEndpoint()
 	shouldUpdate := false
 	if currentEP == nil {
@@ -225,6 +242,9 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 		newEP := &net.UDPAddr{IP: make(net.IP, len(rAddr.IP)), Port: rAddr.Port}
 		copy(newEP.IP, rAddr.IP)
 		peer.SetEndpoint(newEP)
+		if e.cfg.Debug {
+			log.Printf("🔄 Peer %s migrado a %s", netutil.Uint32ToIP(senderVIP), newEP)
+		}
 	}
 
 	peer.UpdateTimestamps(true) 
@@ -243,7 +263,6 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 	// 1. Local Delivery
 	if dstIP == e.localVIP {
 		packetLen := len(plaintext)
-		// Apuntamos al inicio del buffer con Headroom incluido para el driver TUN
 		fullPacket := plaintextBufPtr[:TunHeadroom+packetLen]
 		tb.add(fullPacket, plaintextBufPtr)
 		return
@@ -252,41 +271,46 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 	// 2. Relay (Forward to another peer)
 	targetPeer := e.router.Lookup(dstIP)
 	if targetPeer != nil {
-		e.sendRelay(plaintext, plaintextBufPtr, targetPeer)
+		e.sendRelay(plaintext, plaintextBufPtr, targetPeer, peer)
 		return
 	}
 
-	// 3. Gateway / Default Route (Deliver to TUN)
+	// 3. Gateway / Default Route
 	packetLen := len(plaintext)
 	fullPacket := plaintextBufPtr[:TunHeadroom+packetLen]
 	tb.add(fullPacket, plaintextBufPtr)
 }
 
-// sendRelay re-encripta un paquete recibido y lo pone en la cola de salida TX.
-// Se usa para tráfico Client-to-Client.
-func (e *Engine) sendRelay(plaintext []byte, buff *pool.Buff, peer *PeerInfo) {
-	endpoint := peer.GetEndpoint()
-	aead := peer.GetAEAD()
+func (e *Engine) sendRelay(plaintext []byte, buff *pool.Buff, targetPeer *PeerInfo, sourcePeer *PeerInfo) {
+	endpoint := targetPeer.GetEndpoint()
+	aead := targetPeer.GetAEAD()
 
-	// Si no hay ruta válida, descartamos y liberamos memoria.
 	if endpoint == nil || aead == nil {
 		pool.Put(buff)
 		return
 	}
 
-	// Nuevo buffer para el paquete de salida
+	// --- LIGHTHOUSE SIGNALING ---
+	if sourcePeer != nil {
+		if targetPeer.ShouldNotify() {
+			srcEndpoint := sourcePeer.GetEndpoint()
+			if srcEndpoint != nil {
+				e.sendPeerUpdate(targetPeer, sourcePeer.VirtualIP, srcEndpoint)
+			}
+		}
+		if sourcePeer.ShouldNotify() {
+			e.sendPeerUpdate(sourcePeer, targetPeer.VirtualIP, endpoint)
+		}
+	}
+
 	outBufPtr := pool.Get()
 	outBuf := outBufPtr[:]
 	
 	offset := protocol.HeaderSize
 	
-	// Copiamos el plaintext al nuevo buffer dejando espacio para el header
 	copy(outBuf[offset:], plaintext)
-	
-	// Liberamos el buffer de entrada (plaintext original) ya que hemos hecho copia
 	pool.Put(buff)
 
-	// Generar Nonce en Stack
 	var nonceArr [protocol.NonceSize]byte
 	nonceBuf := nonceArr[:]
 	
@@ -296,11 +320,10 @@ func (e *Engine) sendRelay(plaintext []byte, buff *pool.Buff, peer *PeerInfo) {
 
 	protocol.EncodeDataHeader(outBuf[:offset], e.localVIP, nonceBuf)
 
-	// Encriptar
 	encrypted := aead.Seal(outBuf[offset:offset], nonceBuf, outBuf[offset:offset+len(plaintext)], nil)
 	totalLen := offset + len(encrypted)
 
-	atomic.AddUint64(&peer.BytesTx, uint64(len(encrypted)))
+	atomic.AddUint64(&targetPeer.BytesTx, uint64(len(encrypted)))
 	
 	req := txRequest{
 		Data: outBuf[:totalLen],
@@ -308,20 +331,41 @@ func (e *Engine) sendRelay(plaintext []byte, buff *pool.Buff, peer *PeerInfo) {
 		Addr: endpoint,
 	}
 
-	// Inyectar en el sistema de Batch TX
 	newBatch := txBatchPool.Get().(*TxBatch)
 	newBatch.Reqs[0] = req
 	newBatch.Len = 1
 	
 	select {
 	case e.txCh <- newBatch:
-		// Enviado
 	default:
-		// Canal lleno, drop packet
 		pool.Put(outBufPtr)
 		txBatchPool.Put(newBatch)
-		if e.cfg.Debug {
-			log.Println("⚠️ DROP (Relay): TX Channel Full")
-		}
+	}
+}
+
+func (e *Engine) sendPeerUpdate(destPeer *PeerInfo, aboutVIP uint32, aboutAddr *net.UDPAddr) {
+	pkt := pool.Get()
+	
+	n, err := protocol.EncodePeerUpdate(pkt[:], aboutVIP, aboutAddr)
+	if err != nil {
+		pool.Put(pkt)
+		return
+	}
+
+	req := txRequest{
+		Data: pkt[:n],
+		Buff: pkt,
+		Addr: destPeer.GetEndpoint(),
+	}
+
+	newBatch := txBatchPool.Get().(*TxBatch)
+	newBatch.Reqs[0] = req
+	newBatch.Len = 1
+
+	select {
+	case e.txCh <- newBatch:
+	default:
+		pool.Put(pkt)
+		txBatchPool.Put(newBatch)
 	}
 }

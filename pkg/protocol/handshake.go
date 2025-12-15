@@ -3,11 +3,15 @@ package protocol
 import (
 	"encoding/binary"
 	"errors"
+	"net"
 )
 
 const (
 	HandshakeBaseSize = 37 // 1 Type + 4 SenderIndex + 32 PubKey
 	CookieSize        = 16 // HMAC-MD5 o Blake2s truncado (suficiente para DoS protection)
+	
+	// Estructura PeerUpdate: [1 Type] + [4 TargetVIP] + [4 IP] + [2 Port]
+	PeerUpdateSize    = 11 
 )
 
 // EncodeHandshake serializa un mensaje de inicio de conexión.
@@ -67,4 +71,47 @@ func ParseCookieReply(src []byte) ([]byte, error) {
 		return nil, errors.New("packet too small for cookie reply")
 	}
 	return src[1 : 1+CookieSize], nil
+}
+
+// --- LIGHTHOUSE PROTOCOL EXTENSIONS ---
+
+// EncodePeerUpdate construye un mensaje notificando la nueva ubicación de un peer.
+// Se usa cuando el Faro detecta que un cliente ha cambiado de IP/Puerto.
+func EncodePeerUpdate(dst []byte, targetVIP uint32, endpoint *net.UDPAddr) (int, error) {
+	if len(dst) < PeerUpdateSize {
+		return 0, errors.New("buffer too small for peer update")
+	}
+	
+	ip4 := endpoint.IP.To4()
+	if ip4 == nil {
+		return 0, errors.New("ipv6 peer update not supported yet")
+	}
+
+	dst[0] = MsgTypePeerUpdate
+	binary.BigEndian.PutUint32(dst[1:5], targetVIP)
+	copy(dst[5:9], ip4)
+	binary.BigEndian.PutUint16(dst[9:11], uint16(endpoint.Port))
+
+	return PeerUpdateSize, nil
+}
+
+// ParsePeerUpdate extrae la información de ubicación del peer.
+func ParsePeerUpdate(src []byte) (targetVIP uint32, endpoint *net.UDPAddr, err error) {
+	if len(src) < PeerUpdateSize {
+		return 0, nil, errors.New("packet too small for peer update")
+	}
+
+	targetVIP = binary.BigEndian.Uint32(src[1:5])
+	
+	ip := make(net.IP, 4)
+	copy(ip, src[5:9])
+	
+	port := binary.BigEndian.Uint16(src[9:11])
+
+	endpoint = &net.UDPAddr{
+		IP:   ip,
+		Port: int(port),
+	}
+
+	return targetVIP, endpoint, nil
 }

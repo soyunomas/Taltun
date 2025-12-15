@@ -2,7 +2,22 @@
 
 Todos los cambios notables en el proyecto Taltun serán documentados en este archivo.
 
+## [v0.11.0] - Lighthouse & Hole Punching (Fase 11)
+### 🕯️ Lighthouse Mode & Discovery
+- **Lighthouse Role:** Introducción del modo `lighthouse` en la configuración. Este modo opera exclusivamente en espacio de usuario (sin interfaz TUN), actuando como un faro de señalización y relay de respaldo.
+- **Peer Signaling Protocol:** Implementación del nuevo mensaje `MsgTypePeerUpdate`. Permite al faro notificar a los clientes sobre la ubicación IP pública de sus pares para iniciar conexiones directas.
+- **Hole Punching Asistido:** Lógica de "Simultaneous Open". Cuando dos clientes intentan comunicarse a través del Faro, este instruye a ambos para que inicien un Handshake agresivo entre sí, perforando los NATs simétricos/estáticos.
+- **Route Promotion:** El motor ahora soporta peers "flotantes" (sin endpoint inicial). Al completarse un handshake exitoso y validado, el motor "promociona" la ruta, instalando una entrada `/32` directa y dejando de usar el Faro como relay.
+
+### 🛠️ Correcciones y Estabilidad
+- **Panic Fix:** Solucionado un error crítico donde el motor intentaba escribir en una interfaz TUN inexistente cuando operaba en modo `lighthouse`.
+- **Concurrency Safety:** Corrección de una Race Condition en el limitador de tasa de notificaciones (`ShouldNotify`) mediante el uso de contadores atómicos (`atomic.Int64`) en lugar de `time.Time` no protegido.
+- **Fallback Routing:** Los peers sin endpoint configurado ahora enrutan por defecto hacia el Gateway/Faro hasta que se descubre la ruta directa.
+
+---
+
 ## [v0.10.0] - Internal Switching & Relay (Fase 10)
+... (resto del archivo sin cambios)
 ### 🔀 Advanced Routing (Routing V2)
 - **Radix Trie (LPM):** Reemplazo del mapa plano `map[uint32]*Peer` por una estructura de datos de árbol (`Radix Tree`) optimizada para IPv4. Permite búsquedas de prefijos CIDR (Longest Prefix Match), habilitando arquitecturas **Site-to-Site** donde un peer da acceso a toda una subred (ej. `192.168.1.0/24`).
 - **User-Space Relay (Hairpinning):** Implementación de lógica de conmutación interna. Si un paquete recibido por el servidor tiene como destino otro peer conectado, Taltun lo re-encripta y reenvía directamente en el espacio de usuario.

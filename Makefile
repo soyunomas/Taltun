@@ -2,7 +2,7 @@ BINARY_NAME=vpn
 BUILD_DIR=bin
 SCRIPT_DIR=scripts
 
-.PHONY: all build clean test bench profile integration deps
+.PHONY: all build clean test bench perf profile integration deps
 
 all: build
 
@@ -22,8 +22,12 @@ test:
 	go test -v -race ./...
 
 bench:
-	@echo "🔥 Ejecutando benchmarks..."
-	go test -bench=. -benchmem ./pkg/...
+	@echo "🔥 Ejecutando microbenchmarks reproducibles..."
+	go test -run=^$ -bench=. -benchmem ./pkg/... ./internal/session/...
+
+perf: build
+	@echo "📈 Ejecutando benchmark end-to-end (requiere root, iperf3, jq y curl)..."
+	sudo env PATH="$PATH" BENCH_OUT="$PWD/benchmark-results" ./$(SCRIPT_DIR)/bench_throughput.sh
 
 integration: build
 	@echo "🌍 Ejecutando test de integración (requiere sudo)..."
@@ -31,9 +35,8 @@ integration: build
 	sudo ./$(SCRIPT_DIR)/run_integration_test.sh
 
 profile:
-	@echo "🕵️ Generando perfil de CPU..."
-	go test -bench=. -cpuprofile=cpu.prof ./internal/engine
-	go tool pprof -http=:8080 cpu.prof
+	@echo "🕵️ El benchmark end-to-end genera benchmark-results/cpu.prof"
+	@echo "Ejecuta: make perf && go tool pprof -top benchmark-results/cpu.prof"
 
 clean:
 	@echo "🧹 Limpiando..."

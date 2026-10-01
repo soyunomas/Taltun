@@ -185,6 +185,7 @@ func (e *Engine) processHandshakeResponseV2(
 		return
 	}
 	peer.SetEndpoint(addr)
+	peer.UpdateTimestamps(true)
 	e.promotePeerRoute(peer)
 	e.sendHandshakeFinishV2(h.SessionID, finishTag[:], addr)
 
@@ -226,6 +227,7 @@ func (e *Engine) processHandshakeFinishV2(req HandshakeRequest) {
 		return
 	}
 	peer.SetEndpoint(req.RemoteAddr)
+	peer.UpdateTimestamps(true)
 	e.promotePeerRoute(peer)
 
 	log.Printf("🔐 Sesión v2 aceptada con %s id=%016x", netutil.Uint32ToIP(senderVIP), sessionID)

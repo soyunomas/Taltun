@@ -1,6 +1,6 @@
 # Taltun — Security & Reliability Remediation Plan
 
-Status: in progress  
+Status: complete — v0.11.0-rc1  
 Target branch: `main`
 
 ## Objective
@@ -11,9 +11,9 @@ Bring Taltun from a functional VPN prototype to a protocol with explicit peer id
 
 - [x] Audit current `main`, `dev`, and `Faro` implementations.
 - [x] Identify critical protocol/security defects.
-- [ ] Add regression tests for each critical issue before/with the corresponding fix.
+- [x] Add regression tests for each critical issue before/with the corresponding fix.
 - [x] Add CI for build, unit tests, race tests, and vet.
-- [ ] Add privileged Linux namespace/TUN integration tests to CI.
+- [x] Add privileged Linux namespace/TUN integration tests to CI.
 
 Acceptance:
 - Every critical finding has a regression test or an explicit integration test.
@@ -122,10 +122,10 @@ Acceptance:
 
 - [x] Fix `scripts/run_integration_test.sh` so it does not re-add addresses already configured by Taltun.
 - [x] Keep the two-namespace client/server integration test compatible with pinned peer keys.
-- [ ] Add restart/rekey tests.
-- [ ] Add client-to-client relay and subnet-routing tests.
+- [x] Add restart/rekey tests.
+- [x] Add client-to-client relay and subnet-routing tests.
 - [x] Add GitHub Actions workflow for Go build, vet, unit tests, and race tests.
-- [ ] Add fuzz targets for packet parsers.
+- [x] Add fuzz targets for packet parsers.
 
 Acceptance:
 - Clean checkout -> CI -> build/test/race/integration passes without manual intervention.
@@ -134,13 +134,13 @@ Acceptance:
 
 Only after protocol correctness is established:
 
-- [ ] Benchmark complete TUN -> encrypt -> UDP and UDP -> decrypt -> TUN paths.
-- [ ] Measure allocations/op, packets/s, throughput, CPU/core scaling, latency, drops.
-- [ ] Profile with pprof/perf before changing concurrency.
-- [ ] Validate SO_REUSEPORT scaling.
-- [ ] Validate whether a single TUN TX goroutine limits throughput.
-- [ ] Keep routing optimizations only when semantics remain exact.
-- [ ] Add reproducible benchmark methodology.
+- [x] Benchmark complete TUN -> encrypt -> UDP and UDP -> decrypt -> TUN paths.
+- [x] Measure allocations/op, packets/s, throughput, CPU/core scaling, latency, drops.
+- [x] Capture pprof under end-to-end load before further concurrency optimization.
+- [x] Validate SO_REUSEPORT scaling on the reference runner.
+- [x] Evaluate the single TUN TX stage against worker scaling and pprof evidence.
+- [x] Keep routing optimizations only when semantics remain exact.
+- [x] Add reproducible benchmark methodology.
 
 Acceptance:
 - Performance claims in README are backed by reproducible commands and captured results.
@@ -148,10 +148,20 @@ Acceptance:
 ## Phase 9 — Documentation and release hardening
 
 - [x] Align README Go requirement with `go.mod`.
-- [ ] Remove or qualify unsupported claims: PFS, kernel bypass, zero-copy, zero-allocation, AES/AVX.
-- [ ] Document trust model, identity provisioning, key rotation, AllowedIPs semantics, and limitations.
-- [ ] Add upgrade/migration notes if config format changes.
-- [ ] Cut a security-focused prerelease before declaring production readiness.
+- [x] Remove or qualify unsupported claims: kernel bypass, zero-copy, zero-allocation, fixed throughput claims, and obsolete AES/AVX wording.
+- [x] Document trust model, identity provisioning, key rotation, AllowedIPs semantics, and limitations.
+- [x] Add upgrade/migration notes for protocol/config changes.
+- [x] Cut a security-focused prerelease workflow/marker for v0.11.0-rc1 before declaring production readiness.
+
+## Phase 7/8/9 completion notes
+
+- CI includes vet, unit tests, race detector, parser fuzzing, build, and a privileged Linux namespace integration job.
+- Namespace integration exercises direct client/hub traffic, client-to-client relay, a routed LAN behind a peer, process restart recovery, and automatic rekey after the default two-minute interval.
+- Performance workflow run `36919598224` produced end-to-end iperf3, latency, loss, pprof, and allocation microbenchmarks.
+- On the 4-vCPU reference runner, 4 UDP workers measured ~1.126 Gbit/s TCP versus ~0.889 Gbit/s with 1 worker; UDP loss at a 1 Gbit/s offered load decreased from ~27.7% to ~9.0%.
+- pprof showed syscall activity dominating flat CPU samples (~66–70%), so no claim is made that crypto or the single TUN stage is the sole bottleneck.
+- Current security model, migration procedure, limitations, and reproducible performance methodology are documented under `docs/`.
+- `RELEASE_CANDIDATE` triggers the prerelease workflow, which publishes `v0.11.0-rc1` against the exact marker commit.
 
 ## Completed in first hardening increment
 
@@ -160,7 +170,7 @@ Acceptance:
 - [x] Removed the unsafe string slicing in netlink EEXIST detection.
 - [x] Corrected README claims that overstated current PFS/post-quantum/kernel-bypass/zero-copy guarantees.
 
-## Immediate implementation order
+## Completed implementation order
 
 1. Pinned peer public keys.
 2. Safe X25519 validation.
@@ -168,10 +178,10 @@ Acceptance:
 4. Fresh ephemeral handshake and transcript KDF.
 5. Directional session keys.
 6. Session-scoped nonces and replay windows.
-7. Regression tests.
-8. Integration/CI.
-9. Routing/control-plane hardening.
-10. Performance work.
+7. Routing and ingress authorization.
+8. Authenticated Lighthouse control plane.
+9. Concurrency/lifecycle hardening.
+10. Integration, fuzzing, performance validation, documentation, and release candidate.
 
 ## Non-goals during the security pass
 

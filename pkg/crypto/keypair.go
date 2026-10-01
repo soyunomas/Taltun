@@ -9,22 +9,24 @@ import (
 	"fmt"
 	"io"
 
-	"golang.org/x/crypto/blake2s"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/curve25519"
+	"golang.org/x/crypto/hkdf"
 )
 
-const (
-	KeySize = 32
-)
+const KeySize = 32
 
-// KeyPair contiene las claves asimétricas X25519.
 type KeyPair struct {
 	Private [KeySize]byte
 	Public  [KeySize]byte
 }
 
-// GenerateKeyPair crea un par de claves X25519 aleatorias.
+type SessionKeys struct {
+	InitiatorToResponder [KeySize]byte
+	ResponderToInitiator [KeySize]byte
+	Finish               [KeySize]byte
+}
+
 func GenerateKeyPair() (*KeyPair, error) {
 	kp := &KeyPair{}
 	if _, err := io.ReadFull(rand.Reader, kp.Private[:]); err != nil {
@@ -39,7 +41,6 @@ func GenerateKeyPair() (*KeyPair, error) {
 	return kp, nil
 }
 
-// NewKeyPairFromPrivate carga una identidad estática desde una clave privada existente.
 func NewKeyPairFromPrivate(priv []byte) (*KeyPair, error) {
 	if len(priv) != KeySize {
 		return nil, fmt.Errorf("invalid private key size: %d", len(priv))
@@ -56,14 +57,8 @@ func NewKeyPairFromPrivate(priv []byte) (*KeyPair, error) {
 	return kp, nil
 }
 
-// SharedSecret calcula el secreto crudo X25519.
-//
-// X25519 devuelve error para entradas de bajo orden que producirían un secreto
-// todo-cero. Es importante propagar ese error: aceptar esos puntos convertiría
-// el secreto compartido en un valor conocido por un atacante.
 func (kp *KeyPair) SharedSecret(peerPublic []byte) ([KeySize]byte, error) {
 	var secret [KeySize]byte
-
 	if len(peerPublic) != KeySize {
 		return secret, fmt.Errorf("invalid peer key size: %d", len(peerPublic))
 	}
@@ -76,68 +71,239 @@ func (kp *KeyPair) SharedSecret(peerPublic []byte) ([KeySize]byte, error) {
 	return secret, nil
 }
 
-// DeriveSessionKey convierte el secreto compartido ECDH en una clave AEAD usando KDF (Blake2s).
-//
-// Esta función se mantiene durante la transición al protocolo de sesión v2.
-// El siguiente paso del plan sustituirá la clave única por claves TX/RX
-// direccionales derivadas de un transcript autenticado y efímero.
-func DeriveSessionKey(sharedSecret [KeySize]byte, context string) (cipher.AEAD, error) {
-	kdf, err := blake2s.New256(nil)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := kdf.Write(sharedSecret[:]); err != nil {
-		return nil, err
-	}
-	if _, err := kdf.Write([]byte(context)); err != nil {
-		return nil, err
-	}
-
-	key := kdf.Sum(nil)
-	return chacha20poly1305.New(key)
+func NewAEAD(key [KeySize]byte) (cipher.AEAD, error) {
+	return chacha20poly1305.New(key[:])
 }
 
-
-// HandshakeAuthTag autentica el transcript mínimo del handshake con una clave
-// derivada del secreto estático X25519. Esto demuestra posesión de la clave
-// privada fijada sin exponer el secreto compartido.
-//
-// El transcript incluye emisor y receptor para evitar reflexión entre peers.
-func HandshakeAuthTag(sharedSecret [KeySize]byte, msgType uint8, senderVIP, receiverVIP uint32, senderPublic []byte) ([32]byte, error) {
-	var tag [32]byte
-	if len(senderPublic) != KeySize {
-		return tag, fmt.Errorf("invalid sender public key size: %d", len(senderPublic))
+func GenerateSessionID() (uint64, error) {
+	var raw [8]byte
+	for {
+		if _, err := io.ReadFull(rand.Reader, raw[:]); err != nil {
+			return 0, fmt.Errorf("session id rng fail: %w", err)
+		}
+		id := binary.BigEndian.Uint64(raw[:])
+		if id != 0 {
+			return id, nil
+		}
 	}
+}
 
-	kdf, err := blake2s.New256(nil)
-	if err != nil {
+func HandshakeInitAuthTag(
+	staticShared [KeySize]byte,
+	sessionID uint64,
+	initiatorVIP, responderVIP uint32,
+	initiatorStatic, responderStatic, initiatorEphemeral []byte,
+) ([sha256.Size]byte, error) {
+	var tag [sha256.Size]byte
+	if err := validatePublicKeys(initiatorStatic, responderStatic, initiatorEphemeral); err != nil {
 		return tag, err
 	}
-	_, _ = kdf.Write(sharedSecret[:])
-	_, _ = kdf.Write([]byte("taltun-handshake-auth-v1"))
-	authKey := kdf.Sum(nil)
 
-	mac := hmac.New(sha256.New, authKey)
-	_, _ = mac.Write([]byte{msgType})
-
-	var vipBuf [8]byte
-	binary.BigEndian.PutUint32(vipBuf[0:4], senderVIP)
-	binary.BigEndian.PutUint32(vipBuf[4:8], receiverVIP)
-	_, _ = mac.Write(vipBuf[:])
-	_, _ = mac.Write(senderPublic)
-
+	mac := hmac.New(sha256.New, staticShared[:])
+	writeLabel(mac, "taltun-handshake-init-v2")
+	writeSessionIdentity(mac, sessionID, initiatorVIP, responderVIP)
+	_, _ = mac.Write(initiatorStatic)
+	_, _ = mac.Write(responderStatic)
+	_, _ = mac.Write(initiatorEphemeral)
 	copy(tag[:], mac.Sum(nil))
 	return tag, nil
 }
 
-// VerifyHandshakeAuth valida en tiempo constante la autenticación del handshake.
-func VerifyHandshakeAuth(sharedSecret [KeySize]byte, msgType uint8, senderVIP, receiverVIP uint32, senderPublic, receivedTag []byte) bool {
+func VerifyHandshakeInitAuth(
+	staticShared [KeySize]byte,
+	sessionID uint64,
+	initiatorVIP, responderVIP uint32,
+	initiatorStatic, responderStatic, initiatorEphemeral, receivedTag []byte,
+) bool {
 	if len(receivedTag) != sha256.Size {
 		return false
 	}
-	expected, err := HandshakeAuthTag(sharedSecret, msgType, senderVIP, receiverVIP, senderPublic)
+	expected, err := HandshakeInitAuthTag(
+		staticShared,
+		sessionID,
+		initiatorVIP,
+		responderVIP,
+		initiatorStatic,
+		responderStatic,
+		initiatorEphemeral,
+	)
+	return err == nil && hmac.Equal(expected[:], receivedTag)
+}
+
+func HandshakeResponseAuthTag(
+	staticShared [KeySize]byte,
+	sessionID uint64,
+	initiatorVIP, responderVIP uint32,
+	initiatorStatic, responderStatic, initiatorEphemeral, responderEphemeral []byte,
+) ([sha256.Size]byte, error) {
+	var tag [sha256.Size]byte
+	transcript, err := SessionTranscriptHash(
+		sessionID,
+		initiatorVIP,
+		responderVIP,
+		initiatorStatic,
+		responderStatic,
+		initiatorEphemeral,
+		responderEphemeral,
+	)
 	if err != nil {
+		return tag, err
+	}
+
+	mac := hmac.New(sha256.New, staticShared[:])
+	writeLabel(mac, "taltun-handshake-response-v2")
+	_, _ = mac.Write(transcript[:])
+	copy(tag[:], mac.Sum(nil))
+	return tag, nil
+}
+
+func VerifyHandshakeResponseAuth(
+	staticShared [KeySize]byte,
+	sessionID uint64,
+	initiatorVIP, responderVIP uint32,
+	initiatorStatic, responderStatic, initiatorEphemeral, responderEphemeral, receivedTag []byte,
+) bool {
+	if len(receivedTag) != sha256.Size {
 		return false
 	}
-	return hmac.Equal(expected[:], receivedTag)
+	expected, err := HandshakeResponseAuthTag(
+		staticShared,
+		sessionID,
+		initiatorVIP,
+		responderVIP,
+		initiatorStatic,
+		responderStatic,
+		initiatorEphemeral,
+		responderEphemeral,
+	)
+	return err == nil && hmac.Equal(expected[:], receivedTag)
+}
+
+func SessionTranscriptHash(
+	sessionID uint64,
+	initiatorVIP, responderVIP uint32,
+	initiatorStatic, responderStatic, initiatorEphemeral, responderEphemeral []byte,
+) ([sha256.Size]byte, error) {
+	var zero [sha256.Size]byte
+	if err := validatePublicKeys(initiatorStatic, responderStatic, initiatorEphemeral, responderEphemeral); err != nil {
+		return zero, err
+	}
+
+	h := sha256.New()
+	writeLabel(h, "taltun-session-transcript-v2")
+	writeSessionIdentity(h, sessionID, initiatorVIP, responderVIP)
+	_, _ = h.Write(initiatorStatic)
+	_, _ = h.Write(responderStatic)
+	_, _ = h.Write(initiatorEphemeral)
+	_, _ = h.Write(responderEphemeral)
+
+	var out [sha256.Size]byte
+	copy(out[:], h.Sum(nil))
+	return out, nil
+}
+
+func DeriveSessionKeys(
+	staticShared, ephemeralShared [KeySize]byte,
+	sessionID uint64,
+	initiatorVIP, responderVIP uint32,
+	initiatorStatic, responderStatic, initiatorEphemeral, responderEphemeral []byte,
+) (SessionKeys, error) {
+	var keys SessionKeys
+	transcript, err := SessionTranscriptHash(
+		sessionID,
+		initiatorVIP,
+		responderVIP,
+		initiatorStatic,
+		responderStatic,
+		initiatorEphemeral,
+		responderEphemeral,
+	)
+	if err != nil {
+		return keys, err
+	}
+
+	info := make([]byte, 0, len("taltun-session-keys-v2")+len(transcript))
+	info = append(info, []byte("taltun-session-keys-v2")...)
+	info = append(info, transcript[:]...)
+
+	reader := hkdf.New(sha256.New, ephemeralShared[:], staticShared[:], info)
+	material := make([]byte, KeySize*3)
+	if _, err := io.ReadFull(reader, material); err != nil {
+		return keys, fmt.Errorf("derive session keys: %w", err)
+	}
+
+	copy(keys.InitiatorToResponder[:], material[0:KeySize])
+	copy(keys.ResponderToInitiator[:], material[KeySize:KeySize*2])
+	copy(keys.Finish[:], material[KeySize*2:KeySize*3])
+	return keys, nil
+}
+
+func FinishAuthTag(
+	finishKey [KeySize]byte,
+	sessionID uint64,
+	initiatorVIP, responderVIP uint32,
+	initiatorStatic, responderStatic, initiatorEphemeral, responderEphemeral []byte,
+) ([sha256.Size]byte, error) {
+	var tag [sha256.Size]byte
+	transcript, err := SessionTranscriptHash(
+		sessionID,
+		initiatorVIP,
+		responderVIP,
+		initiatorStatic,
+		responderStatic,
+		initiatorEphemeral,
+		responderEphemeral,
+	)
+	if err != nil {
+		return tag, err
+	}
+
+	mac := hmac.New(sha256.New, finishKey[:])
+	writeLabel(mac, "taltun-handshake-finish-v2")
+	_, _ = mac.Write(transcript[:])
+	copy(tag[:], mac.Sum(nil))
+	return tag, nil
+}
+
+func VerifyFinishAuth(
+	finishKey [KeySize]byte,
+	sessionID uint64,
+	initiatorVIP, responderVIP uint32,
+	initiatorStatic, responderStatic, initiatorEphemeral, responderEphemeral, receivedTag []byte,
+) bool {
+	if len(receivedTag) != sha256.Size {
+		return false
+	}
+	expected, err := FinishAuthTag(
+		finishKey,
+		sessionID,
+		initiatorVIP,
+		responderVIP,
+		initiatorStatic,
+		responderStatic,
+		initiatorEphemeral,
+		responderEphemeral,
+	)
+	return err == nil && hmac.Equal(expected[:], receivedTag)
+}
+
+func validatePublicKeys(keys ...[]byte) error {
+	for _, key := range keys {
+		if len(key) != KeySize {
+			return fmt.Errorf("invalid public key size: %d", len(key))
+		}
+	}
+	return nil
+}
+
+func writeLabel(w io.Writer, label string) {
+	_, _ = io.WriteString(w, label)
+}
+
+func writeSessionIdentity(w io.Writer, sessionID uint64, initiatorVIP, responderVIP uint32) {
+	var buf [16]byte
+	binary.BigEndian.PutUint64(buf[0:8], sessionID)
+	binary.BigEndian.PutUint32(buf[8:12], initiatorVIP)
+	binary.BigEndian.PutUint32(buf[12:16], responderVIP)
+	_, _ = w.Write(buf[:])
 }

@@ -3,7 +3,7 @@
 ![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go)
 ![Platform](https://img.shields.io/badge/Linux-x86__64-linux?style=flat&logo=linux)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
-![Status](https://img.shields.io/badge/Status-Beta%20%28v0.10.0%29-orange)
+![Status](https://img.shields.io/badge/Status-Security%20Hardening-orange)
 ![Performance](https://img.shields.io/badge/Performance-~1Gbps-red)
 
 **Taltun** es un motor VPN diseñado para el rendimiento extremo y la simplicidad operativa. Escrito en Go puro, utiliza técnicas avanzadas de **Kernel Bypass** (Userspace Networking), **Vectorized I/O** y **Lock-Free Concurrency** para saturar enlaces Gigabit en hardware modesto.
@@ -19,10 +19,12 @@ Taltun opera como un **Switch Distribuido Cifrado**, permitiendo topologías Mes
 - **Zero-Copy Hot Path:** El tráfico reenviado (Relay) entre clientes no toca el Kernel ni copia memoria innecesariamente.
 - **Multi-Core Scaling:** Distribuye la carga criptográfica y de I/O entre todos los núcleos disponibles usando `SO_REUSEPORT`.
 
-### 🛡️ Seguridad Post-Quantum Ready
-- **Noise Protocol Framework (Like):** Handshake basado en **Curve25519** (ECDH) y tráfico de datos cifrado con **ChaCha20-Poly1305**.
-- **Perfect Forward Secrecy (PFS):** Las claves de cifrado rotan automáticamente cada 2 minutos.
-- **Anti-Replay & DoS Protection:** Ventana deslizante de 2048 bits y Cookies Stateless para mitigar ataques de denegación de servicio.
+### 🛡️ Seguridad (hardening en curso)
+- **Identidad fijada por peer:** Cada peer requiere una clave pública X25519 configurada; el handshake rechaza identidades que no coinciden con esa clave.
+- **X25519 + ChaCha20-Poly1305:** El intercambio estático usa X25519 con rechazo de puntos de bajo orden y el tráfico usa ChaCha20-Poly1305.
+- **Anti-Replay & DoS Protection:** Ventana deslizante de 2048 bits y cookies stateless para mitigar ataques de denegación de servicio.
+- **PFS / claves direccionales:** En desarrollo. La versión actual todavía usa una clave de sesión simétrica compartida y no debe describirse como PFS.
+- **Post-cuántica:** Taltun no es actualmente post-cuántica; X25519 no ofrece resistencia frente a un adversario cuántico criptográficamente relevante.
 
 ### 🧠 Routing Inteligente (Nuevo en v0.10)
 - **User-Space Relay:** Permite que dos clientes (Spokes) se comuniquen entre sí a través del servidor (Hub) sin necesidad de configurar `iptables` ni IP Forwarding en el servidor.

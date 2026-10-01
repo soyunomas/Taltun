@@ -1,3 +1,5 @@
 v0.11.0-rc1
 Security and reliability hardening release candidate.
-The prerelease workflow must publish this exact commit.
+Final validation includes handshake retransmission, deterministic parser fuzzing,
+privileged namespace restart/relay/subnet/rekey integration, race detection,
+and reproducible performance evidence.

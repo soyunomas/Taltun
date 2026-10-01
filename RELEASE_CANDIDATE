@@ -2,4 +2,4 @@ v0.11.0-rc1
 Security and reliability hardening release candidate.
 Final validation includes handshake retransmission, deterministic parser fuzzing,
 privileged namespace restart/relay/subnet/rekey integration, race detection,
-and reproducible performance evidence.
+reproducible performance evidence, and prerelease retarget verification.

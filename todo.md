@@ -27,23 +27,23 @@ Acceptance:
 - [x] Reject low-order/invalid X25519 peer public keys.
 - [x] Bind the handshake to the configured peer identity instead of trusting the claimed VIP.
 - [x] Authenticate the static handshake transcript with a MAC derived from the pinned X25519 shared secret.
-- [ ] Add freshness/session material to the authenticated transcript so captured handshakes cannot be replayed.
+- [x] Add freshness/session material to the authenticated transcript so captured handshakes cannot be replayed into an active session.
 
 Acceptance:
 - A peer presenting a public key different from the pinned key cannot establish a session.
 - Low-order X25519 inputs are rejected.
 - Knowledge of the peer's public key alone is insufficient to forge a new authenticated handshake.
-- Captured handshake replay remains open until transcript freshness is implemented.
+- Captured init/response/finish packets cannot reinstall an active session without the matching pending ephemeral state.
 
 ## Phase 2 — Fresh sessions, directional keys, nonces
 
-- [ ] Introduce fresh ephemeral X25519 material per handshake/session.
-- [ ] Derive independent TX and RX keys from an authenticated transcript.
-- [ ] Include both peer identities and session-specific entropy in the KDF.
-- [ ] Define a session identifier / generation.
-- [ ] Scope TX counters to a session.
-- [ ] Ensure a `(key, nonce)` pair can never repeat across direction, rekey, or restart.
-- [ ] Replace the current nominal rekey with real cryptographic rekeying.
+- [x] Introduce fresh ephemeral X25519 material per handshake/session.
+- [x] Derive independent TX and RX keys from an authenticated transcript.
+- [x] Include both peer identities and session-specific entropy in the KDF.
+- [x] Define a random 64-bit session identifier / generation.
+- [x] Scope TX counters to a session and prevent counter wrap.
+- [x] Ensure a `(key, nonce)` pair cannot repeat across direction, rekey, or restart under the implemented lifecycle.
+- [x] Replace the nominal rekey with real ephemeral cryptographic rekeying.
 
 Acceptance:
 - Both directions use different traffic keys.
@@ -53,15 +53,25 @@ Acceptance:
 
 ## Phase 3 — Replay and key lifecycle
 
-- [ ] Scope replay windows to a specific session/key generation.
-- [ ] Keep separate replay state for current and previous keys during graceful rollover.
-- [ ] Reset/drop obsolete replay state when the previous key expires.
-- [ ] Add restart and rollover replay regression tests.
+- [x] Scope replay windows to a specific session/key generation.
+- [x] Keep separate replay state for current and previous keys during graceful rollover.
+- [x] Reset/drop obsolete replay state when the previous key expires.
+- [x] Add restart/counter-reset and rollover replay regression tests.
 
 Acceptance:
 - Legitimate packets from a fresh session are accepted even when their counters restart.
 - Replays from the same session are rejected.
 - Replays from an expired session cannot be accepted through rollover state.
+
+## Phase 2/3 completion notes
+
+- Handshake v2 is a three-message authenticated exchange: init, response, finish.
+- Every session uses fresh ephemeral X25519 material plus the pinned static X25519 identity.
+- HKDF-SHA256 derives independent initiator→responder, responder→initiator, and finish keys.
+- The data header carries a 64-bit session ID and is authenticated as ChaCha20-Poly1305 AAD.
+- Each session owns its TX counter and replay window; the previous generation is accepted for a 30-second grace period only.
+- Active session IDs are rejected on handshake and TX counters stop rather than wrap.
+- GitHub CI passes vet, unit tests, race tests, and full build for the completed implementation.
 
 ## Phase 4 — Routing and authorization
 

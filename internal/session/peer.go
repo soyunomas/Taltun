@@ -225,6 +225,15 @@ func (p *Peer) BeginInitiatorHandshake(sessionID uint64, ephemeral *tcrypto.KeyP
 	p.HandshakePending = true
 }
 
+func (p *Peer) PendingInitiatorSessionID() uint64 {
+	p.handshakeMu.Lock()
+	defer p.handshakeMu.Unlock()
+	if p.initiatorPending == nil {
+		return 0
+	}
+	return p.initiatorPending.sessionID
+}
+
 func (p *Peer) GetInitiatorHandshake(sessionID uint64) (*tcrypto.KeyPair, bool) {
 	p.handshakeMu.Lock()
 	defer p.handshakeMu.Unlock()

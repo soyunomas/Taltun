@@ -186,7 +186,9 @@ func (e *Engine) processHandshakeResponseV2(
 	}
 	peer.SetEndpoint(addr)
 	peer.UpdateTimestamps(true)
-	e.promotePeerRoute(peer)
+	// Do not promote the direct /32 yet. The responder must first prove that it
+	// received the finish and installed the fresh session by sending authenticated
+	// traffic back on the direct path.
 	e.sendHandshakeFinishV2(h.SessionID, finishTag[:], addr)
 
 	log.Printf("🔐 Sesión v2 iniciada con %s id=%016x", netutil.Uint32ToIP(h.SenderVIP), h.SessionID)
@@ -229,6 +231,10 @@ func (e *Engine) processHandshakeFinishV2(req HandshakeRequest) {
 	peer.SetEndpoint(req.RemoteAddr)
 	peer.UpdateTimestamps(true)
 	e.promotePeerRoute(peer)
+	// Confirmation packet for the initiator: this proves that finish arrived and
+	// that the responder installed the same session keys before the initiator
+	// switches its route to direct.
+	e.sendKeepalive(peer)
 
 	log.Printf("🔐 Sesión v2 aceptada con %s id=%016x", netutil.Uint32ToIP(senderVIP), sessionID)
 }

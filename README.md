@@ -150,7 +150,7 @@ lighthouse = false
 
 ## 🗼 Lighthouse y NAT traversal
 
-Un Lighthouse no crea interfaz TUN. Mantiene sesiones v2 con los peers, actúa como relay de fallback y distribuye candidatos de endpoint cifrados.
+Un Lighthouse no crea interfaz TUN. Mantiene sesiones v2 con los peers, actúa como relay de fallback y distribuye candidatos de endpoint cifrados. Hay un ejemplo completo en `etc/taltun/lighthouse.example.toml`.
 
 Ejemplo mínimo del Lighthouse:
 

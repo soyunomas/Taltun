@@ -80,8 +80,9 @@ type Engine struct {
 
 	handshakeCh chan HandshakeRequest
 	txCh        chan *TxBatch
-	
-	closed atomic.Bool
+	done        chan struct{}
+	wg          sync.WaitGroup
+	closed      atomic.Bool
 }
 
 type PeerInfo = session.Peer
@@ -101,7 +102,8 @@ func New(c *config.Config) (*Engine, error) {
 		cookieProtector: cookie.NewProtector(),
 		router:          router.New(),
 		handshakeCh:     make(chan HandshakeRequest, 500),
-		txCh:            make(chan *TxBatch, 256), 
+		txCh:            make(chan *TxBatch, 256),
+		done:            make(chan struct{}),
 	}
 
 	initialPeers := make(PeerMap)
@@ -166,44 +168,55 @@ func (e *Engine) AddPeer(virtualIP net.IP, remoteAddr string, publicKeyHex strin
 }
 
 func (e *Engine) Initialize() error {
-	dev, err := tun.CreateTUN(e.cfg.TunName, e.cfg.MTU)
-	if err != nil {
-		return fmt.Errorf("error creando TUN: %v", err)
-	}
-	e.ifce = dev
-
-	ip := netutil.Uint32ToIP(e.localVIP)
-	log.Printf("🔧 Configurando Interfaz %s: IP=%s/24 MTU=%d", e.cfg.TunName, ip, e.cfg.MTU)
-	
-	if err := netutil.AssignIP(e.cfg.TunName, ip); err != nil {
-		dev.Close()
-		return fmt.Errorf("fallo asignando IP: %v", err)
-	}
-
-	if len(e.cfg.Routes) > 0 {
-		log.Printf("🛣️  Añadiendo rutas estáticas locales: %v", e.cfg.Routes)
-		if err := netutil.AddRoutes(e.cfg.TunName, e.cfg.Routes); err != nil {
-			dev.Close()
-			return fmt.Errorf("fallo añadiendo rutas: %v", err)
+	if e.cfg.Mode != "lighthouse" {
+		dev, err := tun.CreateTUN(e.cfg.TunName, e.cfg.MTU)
+		if err != nil {
+			return fmt.Errorf("error creando TUN: %v", err)
 		}
+		e.ifce = dev
+
+		ip := netutil.Uint32ToIP(e.localVIP)
+		log.Printf("🔧 Configurando Interfaz %s: IP=%s/24 MTU=%d", e.cfg.TunName, ip, e.cfg.MTU)
+
+		if err := netutil.AssignIP(e.cfg.TunName, ip); err != nil {
+			_ = dev.Close()
+			e.ifce = nil
+			return fmt.Errorf("fallo asignando IP: %v", err)
+		}
+
+		if len(e.cfg.Routes) > 0 {
+			log.Printf("🛣️  Añadiendo rutas estáticas locales: %v", e.cfg.Routes)
+			if err := netutil.AddRoutes(e.cfg.TunName, e.cfg.Routes); err != nil {
+				_ = dev.Close()
+				e.ifce = nil
+				return fmt.Errorf("fallo añadiendo rutas: %v", err)
+			}
+		}
+	} else {
+		log.Println("💡 Iniciando en modo lighthouse sin interfaz TUN")
 	}
 
 	numCPU := runtime.NumCPU()
 	e.pconns = make([]*ipv4.PacketConn, numCPU)
 	e.rawConns = make([]*net.UDPConn, numCPU)
-	
-	log.Printf("⚙️ Inicializando %d sockets Batch UDP...", numCPU)
 
 	for i := 0; i < numCPU; i++ {
 		c, err := netutil.ListenUDPReusePort("udp", e.cfg.LocalAddr)
 		if err != nil {
-			dev.Close()
+			for _, existing := range e.rawConns {
+				if existing != nil {
+					_ = existing.Close()
+				}
+			}
+			if e.ifce != nil {
+				_ = e.ifce.Close()
+				e.ifce = nil
+			}
 			return fmt.Errorf("error binding socket %d: %v", i, err)
 		}
 		e.rawConns[i] = c
 		e.pconns[i] = ipv4.NewPacketConn(c)
 	}
-
 	return nil
 }
 
@@ -211,54 +224,73 @@ func (e *Engine) Close() {
 	if e.closed.Swap(true) {
 		return
 	}
-	log.Println("🛑 Cerrando recursos (TUN/UDP)...")
-	
-	for _, c := range e.rawConns {
-		c.Close()
+
+	close(e.done)
+	if e.cookieProtector != nil {
+		e.cookieProtector.Close()
 	}
-	
+	for _, c := range e.rawConns {
+		if c != nil {
+			_ = c.Close()
+		}
+	}
 	if e.ifce != nil {
-		e.ifce.Close()
+		_ = e.ifce.Close()
 	}
 }
 
 func (e *Engine) Run(ctx context.Context) error {
-	errChan := make(chan error, len(e.pconns)+3)
+	errChan := make(chan error, len(e.pconns)+4)
+	start := func(fn func() error) {
+		e.wg.Add(1)
+		go func() {
+			defer e.wg.Done()
+			if err := fn(); err != nil {
+				select {
+				case errChan <- err:
+				case <-e.done:
+				}
+			}
+		}()
+	}
 
 	for i, pc := range e.pconns {
 		idx := i
 		pconn := pc
-		go func() {
-			errChan <- e.loopUdpBatchToTun(pconn, idx)
-		}()
+		start(func() error { return e.loopUdpBatchToTun(pconn, idx) })
+	}
+	start(e.loopUdpBatchWrite)
+	start(func() error { return e.housekeepingWorker(ctx) })
+
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		e.handshakeWorker()
+	}()
+
+	if e.cfg.Mode != "lighthouse" {
+		start(e.loopTunReadAndEncrypt)
 	}
 
-	go func() { errChan <- e.loopTunReadAndEncrypt() }()
-	go func() { errChan <- e.loopUdpBatchWrite() }()
-	go func() { errChan <- e.housekeepingWorker(ctx) }() 
-	
-	go e.handshakeWorker()
+	log.Printf("🚀 Engine Running (%s): %d Cores | VIP: %s", e.cfg.Mode, len(e.pconns), e.cfg.LocalVIP)
 
-	log.Printf("🚀 Engine Running (ROUTING V2): %d Cores | VIP: %s", 
-		len(e.pconns), e.cfg.LocalVIP)
-	
 	currentPeers := *e.peers.Load()
 	for _, p := range currentPeers {
 		if p.GetEndpoint() != nil {
-			go e.sendHandshakeInit(p)
+			e.sendHandshakeInit(p)
 		}
 	}
 
+	var runErr error
 	select {
 	case <-ctx.Done():
-		e.Close()
-		return nil
-	case err := <-errChan:
-		if !e.closed.Load() {
-			return err
-		}
-		return nil
+	case runErr = <-errChan:
+	case <-e.done:
 	}
+
+	e.Close()
+	e.wg.Wait()
+	return runErr
 }
 
 // --- HOUSEKEEPING (Rekey + Keepalives) ---
@@ -270,6 +302,8 @@ func (e *Engine) housekeepingWorker(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			return nil
+		case <-e.done:
 			return nil
 		case <-ticker.C:
 			currentPeers := *e.peers.Load()
@@ -529,14 +563,14 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 }
 
 func writeToTun(e *Engine, plaintext []byte, buff *pool.Buff) {
-	// Offset write para cabeceras TUN
+	if e.ifce == nil {
+		pool.Put(buff)
+		return
+	}
 	packetLen := len(plaintext)
 	fullPacket := buff[:TunHeadroom+packetLen]
-
-	if _, err := e.ifce.Write([][]byte{fullPacket}, TunHeadroom); err != nil {
-		if e.cfg.Debug {
-			log.Printf("❌ TUN Write Error: %v", err)
-		}
+	if _, err := e.ifce.Write([][]byte{fullPacket}, TunHeadroom); err != nil && e.cfg.Debug {
+		log.Printf("❌ TUN Write Error: %v", err)
 	}
 	pool.Put(buff)
 }
@@ -734,12 +768,24 @@ func (e *Engine) loopUdpBatchWrite() error {
 	var connIdx int
 
 	for {
-		batch := <-e.txCh
-		
+		var batch *TxBatch
+		select {
+		case <-e.done:
+			return nil
+		case batch = <-e.txCh:
+		}
+
 		count := batch.Len
 		if count == 0 {
 			txBatchPool.Put(batch)
 			continue
+		}
+		if len(e.pconns) == 0 {
+			for i := 0; i < count; i++ {
+				pool.Put(batch.Reqs[i].Buff)
+			}
+			txBatchPool.Put(batch)
+			return fmt.Errorf("no UDP sockets available")
 		}
 
 		for i := 0; i < count; i++ {
@@ -749,35 +795,43 @@ func (e *Engine) loopUdpBatchWrite() error {
 
 		conn := e.pconns[connIdx]
 		connIdx = (connIdx + 1) % len(e.pconns)
-
 		n, err := conn.WriteBatch(msgs[:count], 0)
-		if err != nil {
+		if err != nil && !e.closed.Load() {
 			if e.cfg.Debug {
 				log.Printf("writebatch error: %v", err)
 			}
-			if e.closed.Load() {
-				return nil
-			}
-		} else if n < count && e.cfg.Debug {
+		} else if err == nil && n < count && e.cfg.Debug {
 			log.Printf("⚠️ WriteBatch Parcial: %d/%d enviados", n, count)
 		}
 
 		for i := 0; i < count; i++ {
 			pool.Put(batch.Reqs[i].Buff)
-			batch.Reqs[i].Buff = nil
-			batch.Reqs[i].Data = nil
+			batch.Reqs[i] = txRequest{}
 			msgs[i].Buffers = nil
+			msgs[i].Addr = nil
 		}
-
+		batch.Len = 0
 		txBatchPool.Put(batch)
+
+		if err != nil {
+			if e.closed.Load() {
+				return nil
+			}
+			return err
+		}
 	}
 }
 
 // --- CONTROL PLANE ---
 
 func (e *Engine) handshakeWorker() {
-	for req := range e.handshakeCh {
-		e.processHandshake(req)
+	for {
+		select {
+		case <-e.done:
+			return
+		case req := <-e.handshakeCh:
+			e.processHandshake(req)
+		}
 	}
 }
 

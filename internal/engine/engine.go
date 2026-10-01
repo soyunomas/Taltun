@@ -704,7 +704,12 @@ func (e *Engine) sendRelay(plaintext []byte, buff *pool.Buff, peer *PeerInfo, so
 	case e.txCh <- newBatch:
 		// Relay delivery has priority. Discovery is only an optimization and is
 		// emitted after the forwarding packet has been queued successfully.
-		if e.cfg.Mode == "lighthouse" && sourcePeer != nil && sourcePeer != peer {
+		if e.cfg.Mode == "lighthouse" && sourcePeer != nil && sourcePeer != peer &&
+			atomic.LoadUint64(&sourcePeer.BytesRx) > 0 &&
+			atomic.LoadUint64(&peer.BytesRx) > 0 {
+			// Discovery starts only after the Lighthouse has observed application
+			// traffic in both directions. Relay is therefore the proven baseline;
+			// P2P is an optimization, never a prerequisite for connectivity.
 			if sourceEndpoint := sourcePeer.GetEndpoint(); sourceEndpoint != nil && peer.ShouldNotify() {
 				e.sendPeerUpdate(peer, sourcePeer.VirtualIP, sourceEndpoint)
 			}

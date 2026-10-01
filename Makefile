@@ -15,10 +15,11 @@ build:
 	mkdir -p $(BUILD_DIR)
 	# -ldflags="-s -w" reduce el tamaño del binario (strip debug symbols)
 	go build -ldflags="-s -w" -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/vpn
+	go build -ldflags="-s -w" -o $(BUILD_DIR)/taltun-keygen ./cmd/keygen
 
 test:
 	@echo "🧪 Ejecutando tests unitarios..."
-	go test -v -race ./pkg/...
+	go test -v -race ./...
 
 bench:
 	@echo "🔥 Ejecutando benchmarks..."

@@ -1,6 +1,7 @@
 package router
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -9,17 +10,19 @@ import (
 	"github.com/Soyunomas/taltun/pkg/netutil"
 )
 
-// trieNode es un nodo del árbol Radix binario.
 type trieNode struct {
 	children [2]*trieNode
-	peer     *session.Peer // Si no es nil, este nodo es una coincidencia para un CIDR
+	peer     *session.Peer
 }
 
-// Router implementa un thread-safe Longest Prefix Match para IPv4.
-// Usamos Copy-On-Write (atomic.Pointer) para lecturas lock-free extremadamente rápidas.
+// Router implements exact IPv4 longest-prefix match.
+//
+// Readers are lock-free. Writers serialize, clone only the path being changed,
+// and publish a new immutable root atomically. Nodes reachable from a published
+// root are never mutated.
 type Router struct {
 	root atomic.Pointer[trieNode]
-	mu   sync.Mutex // Protege escrituras (Insert)
+	mu   sync.Mutex
 }
 
 func New() *Router {
@@ -28,82 +31,66 @@ func New() *Router {
 	return r
 }
 
-// Insert añade una ruta CIDR apuntando a un peer.
 func (r *Router) Insert(cidr string, p *session.Peer) error {
-	_, ipNet, err := net.ParseCIDR(cidr)
+	ip, ipNet, err := net.ParseCIDR(cidr)
 	if err != nil {
 		return err
 	}
+	if ip.To4() == nil {
+		return fmt.Errorf("only IPv4 routes are supported: %s", cidr)
+	}
 
-	ones, _ := ipNet.Mask.Size()
-	ip := netutil.IPToUint32(ipNet.IP)
+	ones, bits := ipNet.Mask.Size()
+	if bits != 32 || ones < 0 || ones > 32 {
+		return fmt.Errorf("invalid IPv4 prefix: %s", cidr)
+	}
+	network := netutil.IPToUint32(ipNet.IP)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Clonamos el árbol actual (Copy-On-Write parcial sería ideal, 
-	// pero por simplicidad y seguridad reconstruimos el path afectado o copiamos).
-	// Nota: Para actualizaciones poco frecuentes, clonar es aceptable.
-	// Para optimización extrema, clonaríamos solo los nodos afectados, 
-	// pero aquí usaremos mutación protegida por Lock y el puntero atómico solo para la raíz
-	// si quisiéramos swap completo. 
-	
-	// ESTRATEGIA ACTUAL: El nodo raíz es estático en estructura, pero sus hijos cambian.
-	// Dado que Go maneja la memoria, podemos mutar el árbol bajo lock y las lecturas concurrentes
-	// seguirán punteros viejos hasta que el caché se actualice.
-	// Sin embargo, para seguridad total lock-free en lectura, la estructura no debe mutar
-	// mientras se lee.
-	
-	// Simplificación para Taltun: Usaremos un RWMutex para la estructura del Trie si hay muchas escrituras,
-	// pero como las rutas son estáticas al inicio, atomic.Pointer es overkill si no rotamos todo el árbol.
-	// Vamos a usar un enfoque de recorrido seguro sin locks para lectura asumiendo
-	// que las inserciones ocurren SOLO al inicio o son muy raras.
-	
-	root := r.root.Load()
-	if root == nil {
-		root = &trieNode{}
-		r.root.Store(root)
+	oldRoot := r.root.Load()
+	if oldRoot == nil {
+		oldRoot = &trieNode{}
 	}
-	
-	node := root
-	for i := 0; i < ones; i++ {
-		// Bit i-ésimo de la IP (desde el más significativo)
-		bit := (ip >> (31 - i)) & 1
-		
-		if node.children[bit] == nil {
-			node.children[bit] = &trieNode{}
-		}
-		node = node.children[bit]
-	}
-	
-	node.peer = p
+	newRoot := clonePath(oldRoot, network, 0, ones, p)
+	r.root.Store(newRoot)
 	return nil
 }
 
-// Lookup encuentra el peer más específico para una IP destino (LPM).
-// Hot-Path: No usa locks, ni allocs.
+func clonePath(old *trieNode, ip uint32, depth, prefixLen int, p *session.Peer) *trieNode {
+	next := &trieNode{}
+	if old != nil {
+		*next = *old
+	}
+
+	if depth == prefixLen {
+		next.peer = p
+		return next
+	}
+
+	bit := int((ip >> (31 - depth)) & 1)
+	var oldChild *trieNode
+	if old != nil {
+		oldChild = old.children[bit]
+	}
+	next.children[bit] = clonePath(oldChild, ip, depth+1, prefixLen, p)
+	return next
+}
+
 func (r *Router) Lookup(ip uint32) *session.Peer {
 	node := r.root.Load()
-	var bestMatch *session.Peer
+	var best *session.Peer
 
-	// Recorremos hasta 32 bits
-	for i := 0; i < 32; i++ {
-		if node == nil {
+	for depth := 0; node != nil && depth <= 32; depth++ {
+		if node.peer != nil {
+			best = node.peer
+		}
+		if depth == 32 {
 			break
 		}
-		// Si este nodo tiene un peer, es un candidato (match de prefijo más corto hasta ahora)
-		if node.peer != nil {
-			bestMatch = node.peer
-		}
-
-		bit := (ip >> (31 - i)) & 1
+		bit := int((ip >> (31 - depth)) & 1)
 		node = node.children[bit]
 	}
-
-	// Chequeo final por si el último nodo también era match (ej. /32)
-	if node != nil && node.peer != nil {
-		bestMatch = node.peer
-	}
-
-	return bestMatch
+	return best
 }

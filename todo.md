@@ -75,11 +75,11 @@ Acceptance:
 
 ## Phase 4 — Routing and authorization
 
-- [ ] Separate route selection from ingress authorization.
-- [ ] Enforce source/ingress policy per authenticated peer.
-- [ ] Define exact `AllowedIPs` semantics and test spoofing cases.
-- [ ] Preserve exact IPv4 LPM semantics for arbitrary CIDR lengths.
-- [ ] Reject IPv6 configuration explicitly until the dataplane supports it.
+- [x] Separate route selection from ingress authorization.
+- [x] Enforce source/ingress policy per authenticated peer.
+- [x] Define exact `AllowedIPs` semantics and test spoofing cases.
+- [x] Preserve exact IPv4 LPM semantics for arbitrary CIDR lengths.
+- [x] Reject IPv6 configuration explicitly until the dataplane supports it.
 
 Acceptance:
 - A peer cannot inject source addresses/prefixes it is not authorized to originate.
@@ -87,25 +87,36 @@ Acceptance:
 
 ## Phase 5 — Lighthouse/control-plane security
 
-- [ ] Authenticate all control-plane messages.
-- [ ] Never accept unauthenticated `PeerUpdate` endpoint changes.
-- [ ] Bind endpoint discovery/hole punching to an authenticated lighthouse session.
-- [ ] Add replay protection to control-plane messages.
-- [ ] Review endpoint migration rules and rate limits.
+- [x] Authenticate every state-changing control-plane message; cookie replies remain untrusted stateless DoS challenges.
+- [x] Never accept unauthenticated `PeerUpdate` endpoint changes.
+- [x] Bind endpoint discovery/hole punching to an authenticated lighthouse session.
+- [x] Add replay protection to encrypted `PeerUpdate` messages by sharing the session counter/window.
+- [x] Review endpoint migration rules and rate-limit Lighthouse announcements.
 
 Acceptance:
 - Forged UDP control packets cannot change a peer endpoint or trigger trusted state changes.
 
 ## Phase 6 — Concurrency and lifecycle
 
-- [ ] Remove data races on timestamps/state.
-- [ ] Make dynamic router updates genuinely copy-on-write or consistently synchronized.
-- [ ] Make shutdown deterministic and idempotent.
-- [ ] Ensure goroutines and channels terminate cleanly.
-- [ ] Run the engine under `-race` in CI.
+- [x] Remove data races on hot activity/notification timestamps.
+- [x] Make dynamic router updates genuinely copy-on-write.
+- [x] Make shutdown deterministic and idempotent.
+- [x] Ensure engine and cookie-rotation goroutines terminate cleanly.
+- [x] Run the engine and tests under `-race` in CI.
 
 Acceptance:
 - Race detector passes representative peer traffic, rekey, endpoint migration, and shutdown tests.
+
+## Phase 4/5/6 completion notes
+
+- `AllowedIPs` now has explicit bidirectional semantics: outbound route selection and inbound source authorization. A peer always owns its configured VIP /32 in addition to declared prefixes.
+- The IPv4 router is an immutable binary trie with path copy-on-write and atomic root publication; arbitrary prefix lengths remain exact.
+- `PeerUpdate` is encrypted with the existing v2 session AEAD, authenticated with the control header as AAD, and consumes the same per-session replay counter/window as data packets.
+- Only peers locally configured with `lighthouse = true` may issue discovery updates.
+- A Lighthouse update is only a candidate endpoint: the target endpoint is not installed until a fresh authenticated v2 handshake succeeds.
+- Lighthouse notifications are rate-limited atomically.
+- Hot activity timestamps are atomic; router readers are lock-free over immutable trees.
+- Engine shutdown closes a shared done channel, stops cookie rotation, closes TUN/UDP resources, and waits for workers via a WaitGroup.
 
 ## Phase 7 — Integration tests and CI
 

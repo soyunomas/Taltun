@@ -24,7 +24,9 @@ if ! lsmod | grep -q "^tun"; then
 fi
 
 KEY_SERVER="1111111111111111111111111111111111111111111111111111111111111111"
+PUB_SERVER="7b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f13"
 KEY_CLIENT="2222222222222222222222222222222222222222222222222222222222222222"
+PUB_CLIENT="0faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f20"
 
 echo -e "${GREEN}[*] Compilando...${NC}"
 go build -ldflags="-s -w" -o $BINARY ./cmd/vpn
@@ -57,7 +59,7 @@ sudo ip netns exec $NS_SERVER $BINARY \
     -tun tun0 \
     -key $KEY_SERVER \
     -vip "10.0.0.1" \
-    -peer "10.0.0.2" \
+    -peer "10.0.0.2,,$PUB_CLIENT" \
     -debug > server.log 2>&1 &
 PID_SERVER=$!
 
@@ -68,8 +70,6 @@ if ! ps -p $PID_SERVER > /dev/null; then
     exit 1
 fi
 
-sudo ip netns exec $NS_SERVER ip addr add 10.0.0.1/24 dev tun0
-sudo ip netns exec $NS_SERVER ip link set tun0 up
 
 echo -e "${GREEN}[*] Start Client (VIP 10.0.0.2)...${NC}"
 # Agregado -debug y -vip
@@ -79,7 +79,7 @@ sudo ip netns exec $NS_CLIENT $BINARY \
     -tun tun0 \
     -key $KEY_CLIENT \
     -vip "10.0.0.2" \
-    -peer "10.0.0.1,172.16.0.1:9000" \
+    -peer "10.0.0.1,172.16.0.1:9000,$PUB_SERVER" \
     -debug > client.log 2>&1 &
 PID_CLIENT=$!
 
@@ -90,8 +90,6 @@ if ! ps -p $PID_CLIENT > /dev/null; then
     exit 1
 fi
 
-sudo ip netns exec $NS_CLIENT ip addr add 10.0.0.2/24 dev tun0
-sudo ip netns exec $NS_CLIENT ip link set tun0 up
 
 echo -e "${GREEN}[*] Ping Test...${NC}"
 sleep 3 # Damos un segundo extra para el handshake

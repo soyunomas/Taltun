@@ -3,8 +3,8 @@
 ![Go Version](https://img.shields.io/badge/Go-1.25.3+-00ADD8?style=flat&logo=go)
 ![Platform](https://img.shields.io/badge/Linux-x86__64-linux?style=flat&logo=linux)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
-![Status](https://img.shields.io/badge/Status-Security%20Hardening-orange)
-![Performance](https://img.shields.io/badge/Performance-~1Gbps-red)
+![Status](https://img.shields.io/badge/Status-v0.11--rc1-orange)
+![Performance](https://img.shields.io/badge/CI%20TCP-1.13%20Gbps-blue)
 
 **Taltun** es un motor VPN diseñado para el rendimiento extremo y la simplicidad operativa. Escrito en Go puro, utiliza **Vectorized I/O**, pools de buffers, `SO_REUSEPORT` y forwarding en espacio de usuario. Las cifras de rendimiento y escalado se están revalidando durante el hardening de seguridad.
 
@@ -14,10 +14,14 @@ Taltun opera como un **Switch Distribuido Cifrado**, permitiendo topologías Mes
 
 ## 🚀 Características Principales
 
-### ⚡ Rendimiento "Metal-Close"
-- **Vectorized I/O:** Utiliza `recvmmsg` y `sendmmsg` (syscall batching) para procesar paquetes en bloques de 64, reduciendo el cambio de contexto CPU en un **98%**.
-- **User-space relay:** El tráfico reenviado entre peers evita volver a entrar por TUN, aunque actualmente existe copia de buffers y re-cifrado en el relay.
-- **Multi-Core RX:** Usa `SO_REUSEPORT` para distribuir recepción UDP entre varios workers. El escalado TX completo todavía está pendiente de benchmark reproducible.
+### ⚡ Rendimiento medido
+- **Vectorized UDP I/O:** usa batching de hasta 64 paquetes y `SO_REUSEPORT` para distribuir recepción entre workers.
+- **User-space relay:** evita una vuelta adicional por TUN al reenviar entre peers, aunque el relay sigue copiando y re-cifrando el payload.
+- **Resultado CI de referencia:** en GitHub Actions (Azure, 4 vCPU, MTU 1380), el run de Performance `36919598224` midió ~0,889 Gbit/s TCP con 1 worker y ~1,126 Gbit/s con 4 workers. A 1 Gbit/s UDP ofrecido, la pérdida bajó de ~27,7% a ~9,0%.
+- **Perfil CPU:** pprof atribuyó ~66–70% de las muestras planas a syscalls y ~7–8% a apertura ChaCha20-Poly1305; el cuello de botella observado es principalmente I/O/syscall en ese entorno.
+- **Sin claim de zero-allocation global:** parser/encoder de cabecera miden 0 allocs/op, mientras el benchmark de sesión seal/open mide 1 alloc/op.
+
+Metodología, resultados y comandos reproducibles: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ### 🛡️ Seguridad (hardening en curso)
 - **Identidad fijada por peer:** Cada peer requiere una clave pública X25519 configurada y el handshake exige prueba de posesión de la privada correspondiente.
@@ -103,8 +107,11 @@ vip = "10.0.0.2"
 # Tu Clave Privada (32 bytes hex)
 private_key = "TU_CLAVE_PRIVADA_AQUI"
 
-# MTU del túnel. 1380 es seguro para evitar fragmentación en la mayoría de redes.
+# MTU del túnel. El rango aceptado actualmente es 576..2007.
 mtu = 1380
+
+# Workers UDP. 0 u omisión = runtime.NumCPU().
+workers = 0
 
 # Rutas locales a inyectar en tu sistema operativo al arrancar.
 # Define qué tráfico quieres que "entre" al túnel.
@@ -156,12 +163,13 @@ sudo ./bin/vpn \
 | Flag | Descripción |
 | :--- | :--- |
 | `-config` | Ruta al archivo TOML (Defecto: `config.toml`) |
-| `-mode` | `client` o `server` |
+| `-mode` | `client`, `server` o `lighthouse` |
 | `-vip` | Tu IP dentro de la VPN |
 | `-key` | Tu Clave Privada (Hex) |
 | `-local` | `IP:Puerto` UDP local para escuchar |
 | `-tun` | Nombre de la interfaz (ej. `tun0`) |
-| `-mtu` | Maximum Transmission Unit (Defecto: 1420) |
+| `-mtu` | Maximum Transmission Unit (576..2007; defecto 1420) |
+| `-workers` | Número de workers UDP; 0/omitido usa NumCPU |
 | `-debug` | Activa logs detallados (verbose) |
 
 ---
@@ -306,7 +314,15 @@ Taltun no es solo "otro wrapper de UDP". Su arquitectura está diseñada para la
 3.  **Batcher:** Agrupa hasta 64 paquetes cifrados en una sola estructura.
 4.  **Vectorized Writer:** Envía el lote completo al socket UDP usando `sendmmsg`.
 
-Este pipeline minimiza las "System Calls", que son el principal cuello de botella en VPNs tradicionales escritas en Go o Python.
+El perfil actual confirma que las syscalls dominan el coste en el benchmark CI de referencia. No se asume que ese reparto sea idéntico en otros kernels, CPUs o NICs.
+
+## 🔐 Seguridad y migración
+
+- Modelo de confianza y límites: [docs/SECURITY.md](docs/SECURITY.md)
+- Migración desde v0.10/protocolo anterior: [docs/MIGRATION-v0.11.md](docs/MIGRATION-v0.11.md)
+- Rendimiento reproducible: [docs/PERFORMANCE.md](docs/PERFORMANCE.md)
+
+v0.11 cambia el wire format: una flota v0.10 y una v0.11 no deben mezclarse dentro de la misma sesión.
 
 ---
 

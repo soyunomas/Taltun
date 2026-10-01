@@ -1,122 +1,142 @@
 package protocol
 
 import (
+	"bytes"
 	"testing"
 )
 
-// Test funcional básico
-func TestEncodeParse(t *testing.T) {
-	buf := make([]byte, 1024)
-	nonceIn := []byte("123456789012") // 12 bytes
-	sessionIDIn := uint32(0xAABBCCDD)
+func TestEncodeParseDataHeader(t *testing.T) {
+	buf := make([]byte, HeaderSize+7)
+	nonceIn := []byte("123456789012")
+	senderVIP := uint32(0x0a000002)
+	sessionID := uint64(0x0102030405060708)
 
-	// 1. Encode
-	n, err := EncodeDataHeader(buf, sessionIDIn, nonceIn)
+	n, err := EncodeDataHeader(buf, senderVIP, sessionID, nonceIn)
 	if err != nil {
-		t.Fatalf("Encode failed: %v", err)
+		t.Fatalf("EncodeDataHeader: %v", err)
 	}
-	if n != HeaderSize {
-		t.Errorf("Expected size %d, got %d", HeaderSize, n)
-	}
-
-	// Simular payload
 	copy(buf[n:], []byte("PAYLOAD"))
-	totalLen := n + 7
 
-	// 2. Parse
-	msgType, sessionID, nonceOut, payload, err := ParseHeader(buf[:totalLen])
+	msgType, gotVIP, gotSession, nonceOut, payload, err := ParseHeader(buf)
 	if err != nil {
-		t.Fatalf("Parse failed: %v", err)
+		t.Fatalf("ParseHeader: %v", err)
 	}
-
 	if msgType != MsgTypeData {
-		t.Errorf("Wrong type: %v", msgType)
+		t.Fatalf("type = %d", msgType)
 	}
-	if sessionID != sessionIDIn {
-		t.Errorf("Wrong sessionID: %x", sessionID)
+	if gotVIP != senderVIP {
+		t.Fatalf("VIP = %x, want %x", gotVIP, senderVIP)
 	}
-	if string(nonceOut) != string(nonceIn) {
-		t.Errorf("Wrong nonce")
+	if gotSession != sessionID {
+		t.Fatalf("session = %x, want %x", gotSession, sessionID)
+	}
+	if !bytes.Equal(nonceOut, nonceIn) {
+		t.Fatal("nonce mismatch")
 	}
 	if string(payload) != "PAYLOAD" {
-		t.Errorf("Wrong payload")
+		t.Fatalf("payload = %q", payload)
 	}
 }
 
-// Benchmark de ParseHeader para asegurar Zero-Allocation
-func BenchmarkParseHeader(b *testing.B) {
-	// Preparar datos simulados
-	buf := make([]byte, HeaderSize+100)
-	buf[0] = MsgTypeData
-	buf[1] = 0xAA
-	buf[5] = 0xFF // Inicio Nonce
-
-	b.ResetTimer()
-	b.ReportAllocs() // Esto nos dirá si fallamos en la optimización
-
-	for i := 0; i < b.N; i++ {
-		// La llamada que queremos medir
-		_, _, _, _, _ = ParseHeader(buf)
-	}
-}
-
-// Benchmark de EncodeDataHeader
-func BenchmarkEncodeHeader(b *testing.B) {
+func TestDataHeaderRejectsZeroSession(t *testing.T) {
 	buf := make([]byte, HeaderSize)
-	nonce := []byte("123456789012")
-	sid := uint32(12345)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		_, _ = EncodeDataHeader(buf, sid, nonce)
+	if _, err := EncodeDataHeader(buf, 1, 0, make([]byte, NonceSize)); err == nil {
+		t.Fatal("expected zero session id to be rejected")
 	}
 }
 
-
-func TestHandshakeRoundTripWithAuthTagAndCookie(t *testing.T) {
+func TestHandshakeRoundTrip(t *testing.T) {
 	buf := make([]byte, 256)
-	pub := make([]byte, 32)
+	staticPub := make([]byte, 32)
+	ephemeral := make([]byte, 32)
 	auth := make([]byte, AuthTagSize)
 	cookie := make([]byte, CookieSize)
-	for i := range pub {
-		pub[i] = byte(i + 1)
-	}
-	for i := range auth {
+	for i := range staticPub {
+		staticPub[i] = byte(i + 1)
+		ephemeral[i] = byte(0x80 + i)
 		auth[i] = byte(0xa0 + i%16)
 	}
 	for i := range cookie {
 		cookie[i] = byte(0x10 + i)
 	}
 
-	n, err := EncodeHandshake(buf, MsgTypeHandshakeInit, 0x0a000002, pub, auth, cookie)
+	sessionID := uint64(0x0102030405060708)
+	n, err := EncodeHandshake(
+		buf,
+		MsgTypeHandshakeInit,
+		0x0a000002,
+		sessionID,
+		staticPub,
+		ephemeral,
+		auth,
+		cookie,
+	)
 	if err != nil {
 		t.Fatalf("EncodeHandshake: %v", err)
 	}
 
-	vip, gotPub, gotAuth, gotCookie, err := ParseHandshake(buf[:n])
+	h, err := ParseHandshake(buf[:n])
 	if err != nil {
 		t.Fatalf("ParseHandshake: %v", err)
 	}
-	if vip != 0x0a000002 {
-		t.Fatalf("VIP = %x", vip)
+	if h.Type != MsgTypeHandshakeInit || h.SenderVIP != 0x0a000002 || h.SessionID != sessionID {
+		t.Fatalf("unexpected handshake header: %+v", h)
 	}
-	if string(gotPub) != string(pub) {
-		t.Fatal("public key mismatch")
-	}
-	if string(gotAuth) != string(auth) {
-		t.Fatal("auth tag mismatch")
-	}
-	if string(gotCookie) != string(cookie) {
-		t.Fatal("cookie mismatch")
+	if !bytes.Equal(h.StaticPublic, staticPub) ||
+		!bytes.Equal(h.Ephemeral, ephemeral) ||
+		!bytes.Equal(h.AuthTag, auth) ||
+		!bytes.Equal(h.Cookie, cookie) {
+		t.Fatal("handshake payload mismatch")
 	}
 }
 
-func TestHandshakeRejectsMissingAuthTag(t *testing.T) {
-	buf := make([]byte, 37)
+func TestHandshakeFinishRoundTrip(t *testing.T) {
+	buf := make([]byte, HandshakeFinishSize)
+	auth := bytes.Repeat([]byte{0x42}, AuthTagSize)
+	sessionID := uint64(99)
+
+	n, err := EncodeHandshakeFinish(buf, 0x0a000002, sessionID, auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vip, gotSession, gotAuth, err := ParseHandshakeFinish(buf[:n])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vip != 0x0a000002 || gotSession != sessionID || !bytes.Equal(gotAuth, auth) {
+		t.Fatal("finish round-trip mismatch")
+	}
+}
+
+func TestLegacyHandshakeIsRejected(t *testing.T) {
+	buf := make([]byte, 69)
 	buf[0] = MsgTypeHandshakeInit
-	if _, _, _, _, err := ParseHandshake(buf); err == nil {
-		t.Fatal("expected legacy unauthenticated handshake to be rejected")
+	if _, err := ParseHandshake(buf); err == nil {
+		t.Fatal("expected v1 handshake to be rejected")
+	}
+}
+
+func BenchmarkParseHeader(b *testing.B) {
+	buf := make([]byte, HeaderSize+100)
+	nonce := make([]byte, NonceSize)
+	if _, err := EncodeDataHeader(buf, 1, 1, nonce); err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, _, _, _, _ = ParseHeader(buf)
+	}
+}
+
+func BenchmarkEncodeHeader(b *testing.B) {
+	buf := make([]byte, HeaderSize)
+	nonce := []byte("123456789012")
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = EncodeDataHeader(buf, 1, 1, nonce)
 	}
 }

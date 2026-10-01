@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestKeyExchangeAndDerivation(t *testing.T) {
+func TestKeyExchange(t *testing.T) {
 	alice, err := GenerateKeyPair()
 	if err != nil {
 		t.Fatal(err)
@@ -23,30 +23,8 @@ func TestKeyExchangeAndDerivation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	if !bytes.Equal(aliceShared[:], bobShared[:]) {
-		t.Fatalf("ECDH mismatch\nAlice: %x\nBob:   %x", aliceShared, bobShared)
-	}
-
-	aliceAEAD, err := DeriveSessionKey(aliceShared, "test-context")
-	if err != nil {
-		t.Fatal(err)
-	}
-	bobAEAD, err := DeriveSessionKey(bobShared, "test-context")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	msg := []byte("Attack at dawn!")
-	nonce := make([]byte, aliceAEAD.NonceSize())
-
-	encrypted := aliceAEAD.Seal(nil, nonce, msg, nil)
-	decrypted, err := bobAEAD.Open(nil, nonce, encrypted, nil)
-	if err != nil {
-		t.Fatalf("decryption failed: %v", err)
-	}
-	if !bytes.Equal(decrypted, msg) {
-		t.Errorf("message corrupted: got %q, want %q", decrypted, msg)
+		t.Fatal("X25519 shared secrets differ")
 	}
 }
 
@@ -55,10 +33,8 @@ func TestSharedSecretRejectsLowOrderPublicKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	lowOrder := make([]byte, KeySize)
-	if _, err := kp.SharedSecret(lowOrder); err == nil {
-		t.Fatal("expected X25519 to reject a low-order public key")
+	if _, err := kp.SharedSecret(make([]byte, KeySize)); err == nil {
+		t.Fatal("expected low-order public key rejection")
 	}
 }
 
@@ -67,53 +43,160 @@ func TestSharedSecretRejectsWrongKeySize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	if _, err := kp.SharedSecret(make([]byte, KeySize-1)); err == nil {
-		t.Fatal("expected invalid peer key size to be rejected")
+		t.Fatal("expected invalid peer key size rejection")
 	}
 }
 
+func TestSessionKeyDerivationIsDirectionalAndFresh(t *testing.T) {
+	aliceStatic, _ := GenerateKeyPair()
+	bobStatic, _ := GenerateKeyPair()
+	aliceEph1, _ := GenerateKeyPair()
+	bobEph1, _ := GenerateKeyPair()
 
-func TestHandshakeAuthRequiresSharedSecret(t *testing.T) {
-	alice, err := GenerateKeyPair()
+	staticAB, err := aliceStatic.SharedSecret(bobStatic.Public[:])
 	if err != nil {
 		t.Fatal(err)
 	}
-	bob, err := GenerateKeyPair()
+	staticBA, err := bobStatic.SharedSecret(aliceStatic.Public[:])
 	if err != nil {
 		t.Fatal(err)
 	}
-	mallory, err := GenerateKeyPair()
+	ephAB, err := aliceEph1.SharedSecret(bobEph1.Public[:])
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	sharedAB, err := alice.SharedSecret(bob.Public[:])
+	ephBA, err := bobEph1.SharedSecret(aliceEph1.Public[:])
 	if err != nil {
 		t.Fatal(err)
-	}
-	tag, err := HandshakeAuthTag(sharedAB, 0x01, 0x0a000001, 0x0a000002, alice.Public[:])
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	sharedBA, err := bob.SharedSecret(alice.Public[:])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !VerifyHandshakeAuth(sharedBA, 0x01, 0x0a000001, 0x0a000002, alice.Public[:], tag[:]) {
-		t.Fatal("expected legitimate handshake auth to verify")
 	}
 
-	sharedMalloryBob, err := mallory.SharedSecret(bob.Public[:])
+	keysA, err := DeriveSessionKeys(
+		staticAB, ephAB, 1001, 1, 2,
+		aliceStatic.Public[:], bobStatic.Public[:],
+		aliceEph1.Public[:], bobEph1.Public[:],
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if VerifyHandshakeAuth(sharedMalloryBob, 0x01, 0x0a000001, 0x0a000002, alice.Public[:], tag[:]) {
-		t.Fatal("attacker with a different private key must not authenticate")
+	keysB, err := DeriveSessionKeys(
+		staticBA, ephBA, 1001, 1, 2,
+		aliceStatic.Public[:], bobStatic.Public[:],
+		aliceEph1.Public[:], bobEph1.Public[:],
+	)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	if VerifyHandshakeAuth(sharedBA, 0x01, 0x0a000001, 0x0a000003, alice.Public[:], tag[:]) {
-		t.Fatal("auth tag must be bound to receiver identity")
+	if keysA != keysB {
+		t.Fatal("both peers must derive identical directional material")
+	}
+	if keysA.InitiatorToResponder == keysA.ResponderToInitiator {
+		t.Fatal("TX and RX keys must differ")
+	}
+
+	aliceEph2, _ := GenerateKeyPair()
+	bobEph2, _ := GenerateKeyPair()
+	eph2, err := aliceEph2.SharedSecret(bobEph2.Public[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys2, err := DeriveSessionKeys(
+		staticAB, eph2, 1002, 1, 2,
+		aliceStatic.Public[:], bobStatic.Public[:],
+		aliceEph2.Public[:], bobEph2.Public[:],
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keysA.InitiatorToResponder == keys2.InitiatorToResponder {
+		t.Fatal("fresh handshake must derive a fresh traffic key")
+	}
+}
+
+func TestHandshakeAuthenticationAndFinish(t *testing.T) {
+	initiatorStatic, _ := GenerateKeyPair()
+	responderStatic, _ := GenerateKeyPair()
+	initiatorEph, _ := GenerateKeyPair()
+	responderEph, _ := GenerateKeyPair()
+
+	staticShared, err := initiatorStatic.SharedSecret(responderStatic.Public[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := uint64(77)
+
+	initTag, err := HandshakeInitAuthTag(
+		staticShared, sessionID, 1, 2,
+		initiatorStatic.Public[:], responderStatic.Public[:], initiatorEph.Public[:],
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !VerifyHandshakeInitAuth(
+		staticShared, sessionID, 1, 2,
+		initiatorStatic.Public[:], responderStatic.Public[:], initiatorEph.Public[:], initTag[:],
+	) {
+		t.Fatal("valid init auth rejected")
+	}
+	if VerifyHandshakeInitAuth(
+		staticShared, sessionID+1, 1, 2,
+		initiatorStatic.Public[:], responderStatic.Public[:], initiatorEph.Public[:], initTag[:],
+	) {
+		t.Fatal("init auth must bind session id")
+	}
+
+	respTag, err := HandshakeResponseAuthTag(
+		staticShared, sessionID, 1, 2,
+		initiatorStatic.Public[:], responderStatic.Public[:],
+		initiatorEph.Public[:], responderEph.Public[:],
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !VerifyHandshakeResponseAuth(
+		staticShared, sessionID, 1, 2,
+		initiatorStatic.Public[:], responderStatic.Public[:],
+		initiatorEph.Public[:], responderEph.Public[:], respTag[:],
+	) {
+		t.Fatal("valid response auth rejected")
+	}
+
+	ephShared, err := initiatorEph.SharedSecret(responderEph.Public[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := DeriveSessionKeys(
+		staticShared, ephShared, sessionID, 1, 2,
+		initiatorStatic.Public[:], responderStatic.Public[:],
+		initiatorEph.Public[:], responderEph.Public[:],
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish, err := FinishAuthTag(
+		keys.Finish, sessionID, 1, 2,
+		initiatorStatic.Public[:], responderStatic.Public[:],
+		initiatorEph.Public[:], responderEph.Public[:],
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !VerifyFinishAuth(
+		keys.Finish, sessionID, 1, 2,
+		initiatorStatic.Public[:], responderStatic.Public[:],
+		initiatorEph.Public[:], responderEph.Public[:], finish[:],
+	) {
+		t.Fatal("valid finish auth rejected")
+	}
+
+	wrong := keys.Finish
+	wrong[0] ^= 0xff
+	if VerifyFinishAuth(
+		wrong, sessionID, 1, 2,
+		initiatorStatic.Public[:], responderStatic.Public[:],
+		initiatorEph.Public[:], responderEph.Public[:], finish[:],
+	) {
+		t.Fatal("finish accepted with wrong key")
 	}
 }

@@ -200,6 +200,10 @@ wait_ping() {
   echo "--- lighthouse.log ---" >&2; tail -n 100 "${TMP}/lh.log" >&2 || true
   echo "--- a.log ---" >&2; tail -n 100 "${TMP}/a.log" >&2 || true
   echo "--- b.log ---" >&2; tail -n 100 "${TMP}/b.log" >&2 || true
+  for cap in cap-lh cap-nat-a cap-a cap-nat-b cap-b; do
+    echo "--- ${cap}.log ---" >&2
+    tail -n 160 "${TMP}/${cap}.log" >&2 || true
+  done
   return 1
 }
 
@@ -216,6 +220,18 @@ wait_log() {
   tail -n 120 "${file}" >&2 || true
   return 1
 }
+
+capture_udp() {
+  local ns="$1" file="$2"
+  ip netns exec "${ns}" tcpdump -n -l -i any udp port 9000 >"${file}" 2>&1 &
+  PIDS+=("$!")
+}
+
+capture_udp "${NS_LH}" "${TMP}/cap-lh.log"
+capture_udp "${NS_NAT_A}" "${TMP}/cap-nat-a.log"
+capture_udp "${NS_A}" "${TMP}/cap-a.log"
+capture_udp "${NS_NAT_B}" "${TMP}/cap-nat-b.log"
+capture_udp "${NS_B}" "${TMP}/cap-b.log"
 
 start_node "${NS_LH}" "${TMP}/lh.toml" "${TMP}/lh.log" PID_LH
 start_node "${NS_A}" "${TMP}/a.toml" "${TMP}/a.log" PID_A

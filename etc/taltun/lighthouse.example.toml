@@ -1,0 +1,25 @@
+# Taltun Lighthouse example
+#
+# A Lighthouse has no TUN interface. It keeps authenticated v2 sessions with
+# known peers, provides relay fallback, and distributes encrypted endpoint
+# candidates for direct P2P validation.
+
+[interface]
+mode = "lighthouse"
+local_addr = "0.0.0.0:9000"
+private_key = "LIGHTHOUSE_PRIVATE_KEY_64_HEX"
+vip = "10.77.0.1"
+mtu = 1380
+workers = 0
+debug = false
+
+# Peer A. Endpoint is intentionally omitted: Lighthouse learns the authenticated
+# source endpoint when this peer establishes its v2 session.
+[[peers]]
+vip = "10.77.0.2"
+public_key = "PEER_A_PUBLIC_KEY_64_HEX"
+
+# Peer B.
+[[peers]]
+vip = "10.77.0.3"
+public_key = "PEER_B_PUBLIC_KEY_64_HEX"

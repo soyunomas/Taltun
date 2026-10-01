@@ -33,9 +33,11 @@ Metodología, resultados y comandos reproducibles: [docs/PERFORMANCE.md](docs/PE
 - **Lighthouse autenticado:** Los `PeerUpdate` viajan cifrados dentro de una sesión v2, tienen protección anti-replay y sólo se aceptan de peers marcados localmente con `lighthouse = true`.
 - **Post-cuántica:** Taltun no es actualmente post-cuántica; X25519 no resiste un adversario cuántico criptográficamente relevante.
 
-### 🧠 Routing Inteligente (Nuevo en v0.10)
-- **User-Space Relay:** Permite que dos clientes (Spokes) se comuniquen entre sí a través del servidor (Hub) sin necesidad de configurar `iptables` ni IP Forwarding en el servidor.
-- **Subnet Routing:** Soporte completo para LANs. Un cliente puede anunciar una subred (ej. `192.168.1.0/24`) y el resto de la VPN podrá acceder a ella transparentemente.
+### 🧠 Routing Inteligente
+- **User-Space Relay:** Permite que dos clientes (Spokes) se comuniquen entre sí a través del Hub/Lighthouse sin necesidad de IP forwarding en el host de Taltun.
+- **Subnet Routing:** Un peer puede anunciar una LAN (por ejemplo `192.168.1.0/24`) mediante `allowed_ips`.
+- **Lighthouse + P2P:** Los clientes arrancan con relay como camino seguro. Tras observar tráfico bidireccional, Lighthouse envía candidatos de endpoint autenticados; los peers sólo promocionan una ruta /32 a P2P después de confirmar una sesión v2 directa.
+- **Fallback automático:** Si el camino directo deja de recibir tráfico durante 30 segundos, la /32 vuelve al Lighthouse. El relay mantiene conectividad y puede iniciar un nuevo intento P2P cuando el camino público reaparece.
 
 ---
 
@@ -143,6 +145,60 @@ allowed_ips = ["192.168.50.0/24"]
 # Los PeerUpdate cifrados de otros peers se ignoran.
 lighthouse = false
 ```
+
+---
+
+## 🗼 Lighthouse y NAT traversal
+
+Un Lighthouse no crea interfaz TUN. Mantiene sesiones v2 con los peers, actúa como relay de fallback y distribuye candidatos de endpoint cifrados.
+
+Ejemplo mínimo del Lighthouse:
+
+```toml
+[interface]
+mode = "lighthouse"
+local_addr = "0.0.0.0:9000"
+vip = "10.77.0.1"
+private_key = "PRIVATE_KEY_LIGHTHOUSE"
+
+[[peers]]
+vip = "10.77.0.2"
+public_key = "PUBLIC_KEY_A"
+
+[[peers]]
+vip = "10.77.0.3"
+public_key = "PUBLIC_KEY_B"
+```
+
+En cada cliente se marca **únicamente** al Lighthouse confiable:
+
+```toml
+[[peers]]
+vip = "10.77.0.1"
+public_key = "PUBLIC_KEY_LIGHTHOUSE"
+endpoint = "203.0.113.1:9000"
+allowed_ips = ["10.77.0.0/24"]
+lighthouse = true
+
+# El otro peer se conoce por identidad, aunque inicialmente no tenga endpoint.
+[[peers]]
+vip = "10.77.0.3"
+public_key = "PUBLIC_KEY_B"
+```
+
+Flujo operativo:
+
+1. A y B establecen sesiones autenticadas con Lighthouse.
+2. A→B funciona primero mediante relay.
+3. Cuando Lighthouse ha observado tráfico de aplicación en ambos sentidos, envía `PeerUpdate` cifrados con los endpoints observados.
+4. A y B prueban esos candidatos mediante un handshake v2 directo.
+5. La ruta /32 sólo cambia a P2P después de recibir tráfico autenticado de la sesión directa; un `PeerUpdate` por sí solo nunca instala confianza.
+6. Si el directo queda sin RX durante 30 segundos, la ruta vuelve al Lighthouse.
+7. El tráfico de relay puede volver a disparar discovery y recuperar P2P.
+
+La suite CI `Lighthouse NAT integration` valida relay → P2P → Lighthouse bloqueado → fallo P2P → fallback relay → recuperación P2P usando dos NAT endpoint-independent con mapeo UDP estable/port-preserving.
+
+**Límite:** esto no equivale a ICE/STUN completo. NAT simétrico, CGNAT o firewalls que cambien el mapping según destino pueden impedir el camino directo; en ese caso el diseño esperado es permanecer en relay mientras Lighthouse sea alcanzable.
 
 ---
 

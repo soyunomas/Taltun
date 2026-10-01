@@ -60,10 +60,12 @@ ip link add "${BR}" type bridge
 ip link set "${BR}" up
 
 create_ns() {
-  local ns="$1" host_if="$2" addr="$3"
+  local ns="$1" host_if="$2" addr="$3" peer_if
+  peer_if="${host_if}-ns"
   ip netns add "${ns}"
-  ip link add "${host_if}" type veth peer name eth0
-  ip link set eth0 netns "${ns}"
+  ip link add "${host_if}" type veth peer name "${peer_if}"
+  ip link set "${peer_if}" netns "${ns}"
+  ip netns exec "${ns}" ip link set "${peer_if}" name eth0
   ip link set "${host_if}" master "${BR}"
   ip link set "${host_if}" up
   ip netns exec "${ns}" ip link set lo up

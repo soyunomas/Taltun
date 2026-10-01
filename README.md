@@ -20,11 +20,14 @@ Taltun opera como un **Switch Distribuido Cifrado**, permitiendo topologías Mes
 - **Multi-Core RX:** Usa `SO_REUSEPORT` para distribuir recepción UDP entre varios workers. El escalado TX completo todavía está pendiente de benchmark reproducible.
 
 ### 🛡️ Seguridad (hardening en curso)
-- **Identidad fijada por peer:** Cada peer requiere una clave pública X25519 configurada; el handshake rechaza identidades que no coinciden con esa clave.
-- **X25519 + ChaCha20-Poly1305:** El intercambio estático usa X25519 con rechazo de puntos de bajo orden y el tráfico usa ChaCha20-Poly1305.
-- **Anti-Replay & DoS Protection:** Ventana deslizante de 2048 bits y cookies stateless para mitigar ataques de denegación de servicio.
-- **PFS / claves direccionales:** En desarrollo. La versión actual todavía usa una clave de sesión simétrica compartida y no debe describirse como PFS.
-- **Post-cuántica:** Taltun no es actualmente post-cuántica; X25519 no ofrece resistencia frente a un adversario cuántico criptográficamente relevante.
+- **Identidad fijada por peer:** Cada peer requiere una clave pública X25519 configurada y el handshake exige prueba de posesión de la privada correspondiente.
+- **Handshake efímero v2:** Cada sesión usa X25519 efímero nuevo, `session_id` aleatorio y transcript autenticado.
+- **Claves direccionales:** HKDF-SHA256 deriva claves distintas para cada dirección; el tráfico usa ChaCha20-Poly1305 con cabecera autenticada como AAD.
+- **Forward secrecy:** Las claves de tráfico cambian en cada rekey y dependen del secreto efímero de esa sesión.
+- **Anti-replay por sesión:** Cada generación tiene contador y ventana anti-replay propios; la generación anterior sólo se acepta durante una ventana de transición.
+- **Ingress ACL:** `allowed_ips` define tanto rutas de salida como los prefijos que ese peer está autorizado a originar.
+- **Lighthouse autenticado:** Los `PeerUpdate` viajan cifrados dentro de una sesión v2, tienen protección anti-replay y sólo se aceptan de peers marcados localmente con `lighthouse = true`.
+- **Post-cuántica:** Taltun no es actualmente post-cuántica; X25519 no resiste un adversario cuántico criptográficamente relevante.
 
 ### 🧠 Routing Inteligente (Nuevo en v0.10)
 - **User-Space Relay:** Permite que dos clientes (Spokes) se comuniquen entre sí a través del servidor (Hub) sin necesidad de configurar `iptables` ni IP Forwarding en el servidor.
@@ -123,9 +126,15 @@ endpoint = "203.0.113.1:9000"
 # El handshake se rechaza si la identidad presentada no coincide.
 public_key = "CLAVE_PUBLICA_X25519_DEL_PEER_64_HEX"
 
-# (Nuevo v0.10) AllowedIPs: ¿Qué subredes están "detrás" de este peer?
-# Permite Site-to-Site. Si envías tráfico a estas IPs, Taltun sabrá que debe enviárselo a este Peer.
+# AllowedIPs tiene dos funciones:
+# 1) rutas que salen por este peer;
+# 2) prefijos que este peer puede originar al entrar.
+# La VIP del peer siempre se autoriza como /32.
 allowed_ips = ["192.168.50.0/24"]
+
+# Sólo en clientes que confían en este peer como Lighthouse.
+# Los PeerUpdate cifrados de otros peers se ignoran.
+lighthouse = false
 ```
 
 ---

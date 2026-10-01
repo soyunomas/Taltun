@@ -230,7 +230,10 @@ func (e *Engine) processHandshakeFinishV2(req HandshakeRequest) {
 }
 
 func (e *Engine) sendHandshakeInitV2(p *PeerInfo) {
-	addr := p.GetEndpoint()
+	e.sendHandshakeInitToV2(p, p.GetEndpoint())
+}
+
+func (e *Engine) sendHandshakeInitToV2(p *PeerInfo, addr *net.UDPAddr) {
 	if addr == nil {
 		return
 	}

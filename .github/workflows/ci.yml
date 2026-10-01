@@ -62,9 +62,35 @@ jobs:
       - name: Install network test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y iproute2 iputils-ping kmod
+          sudo apt-get install -y iproute2 iputils-ping kmod iptables
 
       - name: Run privileged namespace suite
         run: |
           chmod +x scripts/run_integration_test.sh
           sudo env "PATH=$PATH" ./scripts/run_integration_test.sh
+
+  lighthouse:
+    name: Lighthouse NAT integration
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install network test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 iputils-ping kmod iptables
+
+      - name: Run Lighthouse NAT suite
+        run: |
+          chmod +x scripts/run_lighthouse_integration_test.sh
+          sudo env "PATH=$PATH" ./scripts/run_lighthouse_integration_test.sh

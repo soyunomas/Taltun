@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net"
@@ -110,15 +111,23 @@ func New(c *config.Config) (*Engine, error) {
 	return e, nil
 }
 
-func (e *Engine) AddPeer(virtualIP net.IP, remoteAddr string, allowedIPs []string) error {
+func (e *Engine) AddPeer(virtualIP net.IP, remoteAddr string, publicKeyHex string, allowedIPs []string) error {
 	vip := netutil.IPToUint32(virtualIP)
 	if vip == 0 {
 		return fmt.Errorf("ip virtual invalida")
 	}
 
+	publicKeyBytes, err := hex.DecodeString(publicKeyHex)
+	if err != nil {
+		return fmt.Errorf("public key invalida para %s: %w", virtualIP, err)
+	}
+	if len(publicKeyBytes) != crypto.KeySize {
+		return fmt.Errorf("public key invalida para %s: esperado %d bytes, recibido %d", virtualIP, crypto.KeySize, len(publicKeyBytes))
+	}
+	var publicKey [crypto.KeySize]byte
+	copy(publicKey[:], publicKeyBytes)
+
 	var udpAddr *net.UDPAddr
-	var err error
-	
 	if remoteAddr != "" {
 		udpAddr, err = net.ResolveUDPAddr("udp", remoteAddr)
 		if err != nil {
@@ -126,7 +135,7 @@ func (e *Engine) AddPeer(virtualIP net.IP, remoteAddr string, allowedIPs []strin
 		}
 	}
 
-	p := session.NewPeer(vip, udpAddr)
+	p := session.NewPeer(vip, udpAddr, publicKey)
 
 	e.peersWriteMu.Lock()
 	defer e.peersWriteMu.Unlock()
@@ -750,6 +759,15 @@ func (e *Engine) processHandshake(req HandshakeRequest) {
 	peer, exists := currentPeers[senderVIP]
 
 	if !exists {
+		return
+	}
+
+	// La VIP declarada no es una identidad. El handshake solo puede continuar
+	// si la clave estática presentada coincide con la fijada en configuración.
+	if !peer.MatchesPublicKey(pubKey) {
+		if e.cfg.Debug {
+			log.Printf("❌ Handshake rechazado para %s: public key no coincide", netutil.Uint32ToIP(senderVIP))
+		}
 		return
 	}
 

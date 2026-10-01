@@ -1,12 +1,12 @@
 # Taltun ⚡
 
-![Go Version](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go)
+![Go Version](https://img.shields.io/badge/Go-1.25.3+-00ADD8?style=flat&logo=go)
 ![Platform](https://img.shields.io/badge/Linux-x86__64-linux?style=flat&logo=linux)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 ![Status](https://img.shields.io/badge/Status-Security%20Hardening-orange)
 ![Performance](https://img.shields.io/badge/Performance-~1Gbps-red)
 
-**Taltun** es un motor VPN diseñado para el rendimiento extremo y la simplicidad operativa. Escrito en Go puro, utiliza técnicas avanzadas de **Kernel Bypass** (Userspace Networking), **Vectorized I/O** y **Lock-Free Concurrency** para saturar enlaces Gigabit en hardware modesto.
+**Taltun** es un motor VPN diseñado para el rendimiento extremo y la simplicidad operativa. Escrito en Go puro, utiliza **Vectorized I/O**, pools de buffers, `SO_REUSEPORT` y forwarding en espacio de usuario. Las cifras de rendimiento y escalado se están revalidando durante el hardening de seguridad.
 
 Taltun opera como un **Switch Distribuido Cifrado**, permitiendo topologías Mesh, Hub & Spoke y Site-to-Site sin complejas configuraciones de firewall ni tablas de enrutamiento en el sistema operativo (gracias a su motor de Relay en espacio de usuario).
 
@@ -16,8 +16,8 @@ Taltun opera como un **Switch Distribuido Cifrado**, permitiendo topologías Mes
 
 ### ⚡ Rendimiento "Metal-Close"
 - **Vectorized I/O:** Utiliza `recvmmsg` y `sendmmsg` (syscall batching) para procesar paquetes en bloques de 64, reduciendo el cambio de contexto CPU en un **98%**.
-- **Zero-Copy Hot Path:** El tráfico reenviado (Relay) entre clientes no toca el Kernel ni copia memoria innecesariamente.
-- **Multi-Core Scaling:** Distribuye la carga criptográfica y de I/O entre todos los núcleos disponibles usando `SO_REUSEPORT`.
+- **User-space relay:** El tráfico reenviado entre peers evita volver a entrar por TUN, aunque actualmente existe copia de buffers y re-cifrado en el relay.
+- **Multi-Core RX:** Usa `SO_REUSEPORT` para distribuir recepción UDP entre varios workers. El escalado TX completo todavía está pendiente de benchmark reproducible.
 
 ### 🛡️ Seguridad (hardening en curso)
 - **Identidad fijada por peer:** Cada peer requiere una clave pública X25519 configurada; el handshake rechaza identidades que no coinciden con esa clave.
@@ -36,7 +36,7 @@ Taltun opera como un **Switch Distribuido Cifrado**, permitiendo topologías Mes
 
 ### Requisitos Previos
 *   **Linux:** Kernel 5.6+ recomendado (para optimizaciones UDP modernas).
-*   **Go:** 1.22 o superior (si compilas desde el código fuente).
+*   **Go:** 1.25.3 o superior (según `go.mod`).
 
 ### Compilación desde Fuente
 
@@ -293,7 +293,7 @@ sudo iptables -t mangle -A FORWARD -o tun0 -p tcp -m tcp --tcp-flags SYN,RST SYN
 Taltun no es solo "otro wrapper de UDP". Su arquitectura está diseñada para la eficiencia:
 
 1.  **TUN Device:** Lee paquetes IP del Kernel.
-2.  **Worker Pool:** Un pool de goroutines cifra los paquetes usando instrucciones AES/AVX.
+2.  **Workers UDP:** Varios workers reciben y descifran tráfico usando ChaCha20-Poly1305.
 3.  **Batcher:** Agrupa hasta 64 paquetes cifrados en una sola estructura.
 4.  **Vectorized Writer:** Envía el lote completo al socket UDP usando `sendmmsg`.
 

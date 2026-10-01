@@ -1,5 +1,6 @@
 v0.11.0-rc1
-Security and reliability hardening release candidate.
+Security, reliability, and Lighthouse release candidate.
 Final validation includes handshake retransmission, deterministic parser fuzzing,
-privileged namespace restart/relay/subnet/rekey integration, race detection,
+privileged namespace restart/relay/subnet/rekey integration, routed Lighthouse
+NAT validation (relay -> direct P2P -> fallback -> recovery), race detection,
 reproducible performance evidence, and prerelease retarget verification.

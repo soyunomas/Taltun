@@ -395,6 +395,12 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 	}
 	msgType := pkt[0]
 
+	if msgType == protocol.MsgTypePeerUpdate {
+		e.processPeerUpdatePacket(pkt, rAddr)
+		pool.Put(originalBuff)
+		return
+	}
+
 	// 1. Control Plane
 	if msgType == protocol.MsgTypeHandshakeInit || msgType == protocol.MsgTypeHandshakeResp || msgType == protocol.MsgTypeHandshakeFinish {
 		underLoad := len(e.handshakeCh) > 250
@@ -549,7 +555,7 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 	// 2. ¿Es para OTRO peer conocido en la malla? -> Relay.
 	targetPeer := e.router.Lookup(dstIP)
 	if targetPeer != nil {
-		e.sendRelay(plaintext, plaintextBufPtr, targetPeer)
+		e.sendRelay(plaintext, plaintextBufPtr, targetPeer, peer)
 		return
 	}
 
@@ -575,8 +581,18 @@ func writeToTun(e *Engine, plaintext []byte, buff *pool.Buff) {
 	pool.Put(buff)
 }
 
-func (e *Engine) sendRelay(plaintext []byte, buff *pool.Buff, peer *PeerInfo) {
+func (e *Engine) sendRelay(plaintext []byte, buff *pool.Buff, peer *PeerInfo, sourcePeer *PeerInfo) {
 	endpoint := peer.GetEndpoint()
+
+	if e.cfg.Mode == "lighthouse" && sourcePeer != nil && sourcePeer != peer {
+		if sourceEndpoint := sourcePeer.GetEndpoint(); sourceEndpoint != nil && peer.ShouldNotify() {
+			e.sendPeerUpdate(peer, sourcePeer.VirtualIP, sourceEndpoint)
+		}
+		if endpoint != nil && sourcePeer.ShouldNotify() {
+			e.sendPeerUpdate(sourcePeer, peer.VirtualIP, endpoint)
+		}
+	}
+
 	sessionID, aead, counter, ok := peer.NextOutbound()
 
 	if endpoint == nil || !ok {

@@ -1,8 +1,11 @@
 package netutil
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"strings"
+	"syscall"
 
 	"github.com/vishvananda/netlink"
 )
@@ -74,6 +77,13 @@ func AddRoutes(ifaceName string, routes []string) error {
 }
 
 func containsFileExists(err error) bool {
-	return err != nil && (err.Error() == "file exists" || 
-		(len(err.Error()) > 0 && err.Error()[len(err.Error())-11:] == "file exists"))
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.EEXIST) {
+		return true
+	}
+	// Algunos backends de netlink envuelven el errno como texto. Mantener este
+	// fallback sin indexar manualmente evita panics ante mensajes cortos.
+	return strings.HasSuffix(strings.ToLower(err.Error()), "file exists")
 }

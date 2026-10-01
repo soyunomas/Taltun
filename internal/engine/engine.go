@@ -552,6 +552,10 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 		counter,
 	)
 	if err != nil {
+		if e.cfg.Debug {
+			log.Printf("❌ RX OPEN sender=%s session=%016x counter=%d remote=%v err=%v",
+				netutil.Uint32ToIP(senderVIP), sessionID, counter, rAddr, err)
+		}
 		pool.Put(plaintextBufPtr)
 		pool.Put(originalBuff)
 		return
@@ -728,8 +732,6 @@ func (e *Engine) loopTunReadAndEncrypt() error {
 	}
 	
 	offset := protocol.HeaderSize
-	var lastDstIP uint32
-	var lastPeer *PeerInfo
 
 	currentBatch := txBatchPool.Get().(*TxBatch)
 	currentBatch.Len = 0
@@ -756,21 +758,9 @@ func (e *Engine) loopTunReadAndEncrypt() error {
 				continue
 			}
 			
-			var peer *PeerInfo
-			
-			if lastPeer != nil && lastDstIP == dstIP {
-				peer = lastPeer
-			} else {
-				peer = e.router.Lookup(dstIP)
-
-				if peer != nil {
-					lastDstIP = dstIP
-					lastPeer = peer
-				} else {
-					if e.cfg.Debug {
-						// log.Printf("❌ DROP TX: No ruta para %s", netutil.Uint32ToIP(dstIP))
-					}
-				}
+			peer := e.router.Lookup(dstIP)
+			if peer == nil && e.cfg.Debug {
+				log.Printf("❌ DROP TX: No ruta para %s", netutil.Uint32ToIP(dstIP))
 			}
 
 			if peer == nil {

@@ -26,12 +26,14 @@ Acceptance:
 - [x] Replace deprecated `curve25519.ScalarMult` with `curve25519.X25519`.
 - [x] Reject low-order/invalid X25519 peer public keys.
 - [x] Bind the handshake to the configured peer identity instead of trusting the claimed VIP.
-- [ ] Add handshake transcript material suitable for deterministic key derivation.
+- [x] Authenticate the static handshake transcript with a MAC derived from the pinned X25519 shared secret.
+- [ ] Add freshness/session material to the authenticated transcript so captured handshakes cannot be replayed.
 
 Acceptance:
 - A peer presenting a public key different from the pinned key cannot establish a session.
 - Low-order X25519 inputs are rejected.
-- A claimed VIP alone is insufficient to impersonate a peer.
+- Knowledge of the peer's public key alone is insufficient to forge a new authenticated handshake.
+- Captured handshake replay remains open until transcript freshness is implemented.
 
 ## Phase 2 — Fresh sessions, directional keys, nonces
 

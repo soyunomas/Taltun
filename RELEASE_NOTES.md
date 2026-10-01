@@ -20,6 +20,7 @@ This release candidate is a protocol-breaking security and reliability release. 
 - Dynamic route changes use immutable path copy-on-write and atomic root publication.
 - Activity timestamps and Lighthouse notification throttling are atomic.
 - Shutdown is idempotent and waits for engine workers; cookie rotation is stoppable.
+- Initial/rekey handshakes are retransmitted after a bounded timeout so a lost UDP handshake cannot strand a peer indefinitely.
 
 ## Verification
 

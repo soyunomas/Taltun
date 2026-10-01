@@ -23,6 +23,7 @@ const (
 	PreviousKeyGraceTime = 30 * time.Second
 	NotifyInterval       = 5 * time.Second
 	HandshakeRetryInterval = 2 * time.Second
+	DirectFallbackTimeout   = 30 * time.Second
 )
 
 type trafficSession struct {
@@ -191,6 +192,14 @@ func (p *Peer) UpdateTimestamps(isRx bool) {
 	} else {
 		p.lastSentNano.Store(now)
 	}
+}
+
+func (p *Peer) ReceiveStale(after time.Duration) bool {
+	last := p.lastRxNano.Load()
+	if last == 0 {
+		return true
+	}
+	return time.Since(time.Unix(0, last)) >= after
 }
 
 func (p *Peer) NeedsKeepalive() bool {

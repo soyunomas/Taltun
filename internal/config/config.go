@@ -37,6 +37,7 @@ type PeerConfig struct {
 	PublicKey  string   `toml:"public_key"`
 	Endpoint   string   `toml:"endpoint"` // Opcional
 	AllowedIPs []string `toml:"allowed_ips"`
+	Lighthouse bool     `toml:"lighthouse"`
 }
 
 // fileConfig es el mapeo intermedio para TOML.

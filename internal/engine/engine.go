@@ -594,6 +594,14 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 	atomic.AddUint64(&peer.BytesRx, uint64(len(plaintext)))
 
 	dstIP := netutil.ExtractDstIP(plaintext)
+	if e.cfg.Debug {
+		log.Printf("🔎 RX DATA sender=%s src=%s dst=%s bytes=%d",
+			netutil.Uint32ToIP(senderVIP),
+			netutil.Uint32ToIP(netutil.ExtractSrcIP(plaintext)),
+			netutil.Uint32ToIP(dstIP),
+			len(plaintext),
+		)
+	}
 	
 	// --- ENRUTAMIENTO CRÍTICO (Gateway / Site-to-Site Fix) ---
 
@@ -606,6 +614,13 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 	// 2. ¿Es para OTRO peer conocido en la malla? -> Relay.
 	targetPeer := e.router.Lookup(dstIP)
 	if targetPeer != nil {
+		if e.cfg.Debug {
+			log.Printf("🔁 RELAY dst=%s via peer=%s endpoint=%v",
+				netutil.Uint32ToIP(dstIP),
+				netutil.Uint32ToIP(targetPeer.VirtualIP),
+				targetPeer.GetEndpoint(),
+			)
+		}
 		e.sendRelay(plaintext, plaintextBufPtr, targetPeer, peer)
 		return
 	}

@@ -14,6 +14,9 @@ Todos los cambios notables en el proyecto Taltun serán documentados en este arc
 - Cabeceras de datos y control autenticadas como AAD de ChaCha20-Poly1305.
 - `AllowedIPs` aplicado también como ACL de origen.
 - `PeerUpdate` de Lighthouse cifrado, autenticado, rate-limited y protegido frente a replay.
+- Discovery Lighthouse relay-first: P2P sólo se intenta después de tráfico bidireccional por relay.
+- Promoción de ruta /32 únicamente tras confirmación de tráfico autenticado en la sesión directa.
+- Fallback automático a Lighthouse tras 30 s sin RX directo y recuperación P2P posterior.
 
 ### Routing y concurrencia
 - Trie IPv4 LPM exacto con copy-on-write real y publicación atómica.
@@ -26,6 +29,7 @@ Todos los cambios notables en el proyecto Taltun serán documentados en este arc
 ### Verificación
 - CI: vet, unit tests, race detector, fuzzing de parsers y build.
 - Integración privilegiada con namespaces: relay cliente-cliente, subnet routing, restart y rekey automático.
+- Integración Lighthouse/NAT en topología Internet enrutada: relay inicial, P2P directo, Lighthouse bloqueado, caída del directo, fallback relay y recuperación P2P.
 - Workflow Performance con pprof, iperf3, latencia, pérdida y microbenchmarks de allocations.
 
 ### Rendimiento de referencia
@@ -43,6 +47,7 @@ Estas cifras son específicas de ese entorno y no constituyen una garantía univ
 - `public_key` es obligatorio por peer.
 - `lighthouse = true` declara explícitamente un peer de descubrimiento confiable.
 - IPv4 únicamente en esta release candidate.
+- P2P NAT validado con mapping UDP endpoint-independent y port-preserving; NAT simétrico/CGNAT restrictivo puede permanecer en relay.
 
 ---
 

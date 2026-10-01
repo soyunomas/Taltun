@@ -118,7 +118,7 @@ func HandshakeAuthTag(sharedSecret [KeySize]byte, msgType uint8, senderVIP, rece
 	authKey := kdf.Sum(nil)
 
 	mac := hmac.New(sha256.New, authKey)
-	_ = mac.Write([]byte{msgType})
+	_, _ = mac.Write([]byte{msgType})
 
 	var vipBuf [8]byte
 	binary.BigEndian.PutUint32(vipBuf[0:4], senderVIP)

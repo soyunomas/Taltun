@@ -41,6 +41,9 @@ routes = ["10.100.0.0/24"]
 # La IP Virtual del Servidor
 vip = "10.100.0.1"
 
+# Clave pública X25519 fijada del servidor. Obligatoria.
+public_key = "CLAVE_PUBLICA_X25519_DEL_SERVIDOR_64_HEX"
+
 # La dirección IP PÚBLICA y PUERTO del servidor.
 # Esto es obligatorio para que el cliente sepa dónde llamar.
 endpoint = "203.0.113.10:51820"

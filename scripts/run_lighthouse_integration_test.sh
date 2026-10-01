@@ -215,8 +215,8 @@ start_node "${NS_LH}" "${TMP}/lh.toml" "${TMP}/lh.log" PID_LH
 start_node "${NS_A}" "${TMP}/a.toml" "${TMP}/a.log" PID_A
 start_node "${NS_B}" "${TMP}/b.toml" "${TMP}/b.log" PID_B
 
-wait_ping "${NS_A}" 10.77.0.1 "A -> Lighthouse session"
-wait_ping "${NS_B}" 10.77.0.1 "B -> Lighthouse session"
+wait_log "${TMP}/a.log" 'Sesión v2 iniciada con 10.77.0.1' "A established encrypted session with Lighthouse"
+wait_log "${TMP}/b.log" 'Sesión v2 iniciada con 10.77.0.1' "B established encrypted session with Lighthouse"
 
 # First A->B traffic must work through the Lighthouse relay because neither
 # spoke starts with the other's endpoint.

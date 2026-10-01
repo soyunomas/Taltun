@@ -36,9 +36,9 @@ jobs:
 
       - name: Fuzz packet parsers
         run: |
-          go test ./pkg/protocol -run=^$ -fuzz=FuzzParseDataHeader -fuzztime=5s
-          go test ./pkg/protocol -run=^$ -fuzz=FuzzParseHandshake -fuzztime=5s
-          go test ./pkg/protocol -run=^$ -fuzz=FuzzParseControl -fuzztime=5s
+          go test ./pkg/protocol -run=^$ -fuzz=FuzzParseDataHeader -fuzztime=50000x
+          go test ./pkg/protocol -run=^$ -fuzz=FuzzParseHandshake -fuzztime=50000x
+          go test ./pkg/protocol -run=^$ -fuzz=FuzzParseControl -fuzztime=50000x
 
       - name: Build
         run: go build ./...

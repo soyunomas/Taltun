@@ -58,7 +58,7 @@ type fileConfig struct {
 func Load() (*Config, error) {
 	configPath := flag.String("config", "config.toml", "Ruta al archivo de configuración")
 
-	fMode := flag.String("mode", "", "Override: client | server")
+	fMode := flag.String("mode", "", "Override: client | server | lighthouse")
 	fLocal := flag.String("local", "", "Override: Bind Address")
 	fTun := flag.String("tun", "", "Override: Interface Name")
 	fKey := flag.String("key", "", "Override: Hex Private Key")
@@ -162,8 +162,20 @@ func Load() (*Config, error) {
 	}
 	cfg.SecretKey = keyBytes
 
+	if cfg.Mode != "client" && cfg.Mode != "server" && cfg.Mode != "lighthouse" {
+		return nil, fmt.Errorf("mode invalido: %s", cfg.Mode)
+	}
 	if _, err := net.ResolveUDPAddr("udp", cfg.LocalAddr); err != nil {
 		return nil, fmt.Errorf("local addr invalida: %v", err)
+	}
+	for _, route := range cfg.Routes {
+		ip, network, err := net.ParseCIDR(route)
+		if err != nil || ip.To4() == nil || network.Mask.String() == "" {
+			return nil, fmt.Errorf("route IPv4 invalida: %s", route)
+		}
+		if ones, bits := network.Mask.Size(); bits != 32 || ones < 0 {
+			return nil, fmt.Errorf("route debe ser IPv4: %s", route)
+		}
 	}
 
 	if finalVIP == "" {
@@ -191,6 +203,15 @@ func Load() (*Config, error) {
 		}
 		if _, err := decodeKey(peer.PublicKey); err != nil {
 			return nil, fmt.Errorf("peer %s: public_key invalida: %w", peer.VIP, err)
+		}
+		for _, cidr := range peer.AllowedIPs {
+			ip, network, err := net.ParseCIDR(cidr)
+			if err != nil || ip.To4() == nil {
+				return nil, fmt.Errorf("peer %s: allowed_ip IPv4 invalida: %s", peer.VIP, cidr)
+			}
+			if ones, bits := network.Mask.Size(); bits != 32 || ones < 0 {
+				return nil, fmt.Errorf("peer %s: allowed_ip debe ser IPv4: %s", peer.VIP, cidr)
+			}
 		}
 	}
 

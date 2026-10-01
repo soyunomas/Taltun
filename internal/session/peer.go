@@ -6,58 +6,73 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/cpu"
 
+	tcrypto "github.com/Soyunomas/taltun/pkg/crypto"
 	"github.com/Soyunomas/taltun/pkg/replay"
 )
 
-// CacheLineSize se usa para evitar False Sharing.
 const cacheLineSize = 128
 
-// Constantes de Tiempos.
 const (
-	RekeyInterval    = 2 * time.Minute
-	KeepaliveTimeout = 10 * time.Second
+	RekeyInterval        = 2 * time.Minute
+	KeepaliveTimeout     = 10 * time.Second
+	PreviousKeyGraceTime = 30 * time.Second
 )
 
-// Peer representa un nodo remoto conectado a la VPN.
+type trafficSession struct {
+	id        uint64
+	txAEAD    cipher.AEAD
+	rxAEAD    cipher.AEAD
+	txCounter atomic.Uint64
+	replay    *replay.Filter
+	createdAt time.Time
+	expiresAt time.Time
+}
+
+type pendingInitiator struct {
+	sessionID uint64
+	ephemeral *tcrypto.KeyPair
+}
+
+type pendingResponder struct {
+	sessionID          uint64
+	initiatorEphemeral [tcrypto.KeySize]byte
+	responderEphemeral *tcrypto.KeyPair
+	keys               tcrypto.SessionKeys
+}
+
 type Peer struct {
-	// --- BLOQUE 1: Read-Mostly / Cold Data ---
 	VirtualIP uint32
-	PublicKey [32]byte
+	PublicKey [tcrypto.KeySize]byte
 
-	// Crypto State (Protegido por RWMutex propio)
 	cryptoMu sync.RWMutex
-	aead     cipher.AEAD
-	prevAEAD cipher.AEAD
+	current  *trafficSession
+	previous *trafficSession
 
-	LastHandshake    time.Time
-	HandshakePending bool
+	handshakeMu        sync.Mutex
+	initiatorPending   *pendingInitiator
+	responderPending   *pendingResponder
+	LastHandshake      time.Time
+	HandshakePending   bool
 
-	// Estado para DoS Protection (Cookie)
 	cookieMu   sync.Mutex
 	LastCookie []byte
 	CookieTime time.Time
 
 	_ [cacheLineSize]byte
 
-	// --- BLOQUE 2: Hot Control Data (Endpoint & Security) ---
 	endpointMu sync.RWMutex
 	endpoint   *net.UDPAddr
 
-	// Timestamps para Housekeeping (Keepalives).
-	// TODO: migrar a atomics para eliminar la carrera bajo -race.
 	lastSent time.Time
 	lastRx   time.Time
 
-	// Anti-Replay Filter
-	replayFilter *replay.Filter
-
 	_ [cacheLineSize]byte
 
-	// --- BLOQUE 3: Atomic Counters (Hot Writes) ---
 	BytesTx uint64
 
 	_ [cacheLineSize]byte
@@ -65,19 +80,16 @@ type Peer struct {
 	BytesRx uint64
 }
 
-func NewPeer(vip uint32, endpoint *net.UDPAddr, publicKey [32]byte) *Peer {
+func NewPeer(vip uint32, endpoint *net.UDPAddr, publicKey [tcrypto.KeySize]byte) *Peer {
 	return &Peer{
-		VirtualIP:    vip,
-		PublicKey:    publicKey,
-		endpoint:     endpoint,
-		replayFilter: replay.NewFilter(),
-		lastSent:     time.Now(),
-		lastRx:       time.Now(),
+		VirtualIP: vip,
+		PublicKey: publicKey,
+		endpoint:  endpoint,
+		lastSent:  time.Now(),
+		lastRx:    time.Now(),
 	}
 }
 
-// MatchesPublicKey compara en tiempo constante la identidad presentada durante
-// el handshake con la clave pública fijada en configuración.
 func (p *Peer) MatchesPublicKey(publicKey []byte) bool {
 	if len(publicKey) != len(p.PublicKey) {
 		return false
@@ -97,8 +109,6 @@ func (p *Peer) SetEndpoint(addr *net.UDPAddr) {
 	p.endpoint = addr
 }
 
-// UpdateTimestamps actualiza los contadores de actividad.
-// isRx=true (Recibido), isRx=false (Enviado)
 func (p *Peer) UpdateTimestamps(isRx bool) {
 	now := time.Now()
 	if isRx {
@@ -114,76 +124,227 @@ func (p *Peer) NeedsKeepalive() bool {
 
 func (p *Peer) NeedsRekey() bool {
 	p.cryptoMu.RLock()
-	defer p.cryptoMu.RUnlock()
-
-	if p.aead == nil {
+	current := p.current
+	p.cryptoMu.RUnlock()
+	if current == nil {
 		return false
 	}
+
+	p.handshakeMu.Lock()
+	defer p.handshakeMu.Unlock()
 	if p.HandshakePending {
 		return false
 	}
-
 	return time.Since(p.LastHandshake) > RekeyInterval
 }
 
-func (p *Peer) MarkHandshakePending() {
-	p.cryptoMu.Lock()
+func (p *Peer) BeginInitiatorHandshake(sessionID uint64, ephemeral *tcrypto.KeyPair) {
+	p.handshakeMu.Lock()
+	defer p.handshakeMu.Unlock()
+	p.initiatorPending = &pendingInitiator{
+		sessionID: sessionID,
+		ephemeral: ephemeral,
+	}
 	p.HandshakePending = true
-	p.cryptoMu.Unlock()
 }
 
-// GetAEAD devuelve el cifrador actual.
-func (p *Peer) GetAEAD() cipher.AEAD {
-	p.cryptoMu.RLock()
-	defer p.cryptoMu.RUnlock()
-	return p.aead
+func (p *Peer) GetInitiatorHandshake(sessionID uint64) (*tcrypto.KeyPair, bool) {
+	p.handshakeMu.Lock()
+	defer p.handshakeMu.Unlock()
+	if p.initiatorPending == nil || p.initiatorPending.sessionID != sessionID {
+		return nil, false
+	}
+	return p.initiatorPending.ephemeral, true
 }
 
-// Open intenta descifrar usando la clave actual, y si falla, la anterior.
-func (p *Peer) Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error) {
-	p.cryptoMu.RLock()
-	current := p.aead
-	prev := p.prevAEAD
-	p.cryptoMu.RUnlock()
-
-	if current == nil {
-		return nil, errors.New("no session key")
+func (p *Peer) SetResponderHandshake(
+	sessionID uint64,
+	initiatorEphemeral [tcrypto.KeySize]byte,
+	responderEphemeral *tcrypto.KeyPair,
+	keys tcrypto.SessionKeys,
+) {
+	p.handshakeMu.Lock()
+	defer p.handshakeMu.Unlock()
+	p.responderPending = &pendingResponder{
+		sessionID:          sessionID,
+		initiatorEphemeral: initiatorEphemeral,
+		responderEphemeral: responderEphemeral,
+		keys:               keys,
 	}
-
-	res, err := current.Open(dst, nonce, ciphertext, additionalData)
-	if err == nil {
-		return res, nil
-	}
-
-	if prev != nil {
-		res, err = prev.Open(dst, nonce, ciphertext, additionalData)
-		if err == nil {
-			return res, nil
-		}
-	}
-
-	return nil, err
 }
 
-// SetSessionKey actualiza el cifrador y rota el anterior.
-//
-// TODO(protocol-v2): separar TX/RX, asociar replay state a cada generación
-// de clave y reiniciar contadores únicamente cuando cambie la clave.
-func (p *Peer) SetSessionKey(newAEAD cipher.AEAD) {
+func (p *Peer) GetResponderHandshake(sessionID uint64) (
+	initiatorEphemeral [tcrypto.KeySize]byte,
+	responderEphemeral *tcrypto.KeyPair,
+	keys tcrypto.SessionKeys,
+	ok bool,
+) {
+	p.handshakeMu.Lock()
+	defer p.handshakeMu.Unlock()
+	if p.responderPending == nil || p.responderPending.sessionID != sessionID {
+		return initiatorEphemeral, nil, keys, false
+	}
+	return p.responderPending.initiatorEphemeral, p.responderPending.responderEphemeral, p.responderPending.keys, true
+}
+
+func (p *Peer) CompleteInitiatorHandshake(sessionID uint64, txKey, rxKey [tcrypto.KeySize]byte) error {
+	p.handshakeMu.Lock()
+	defer p.handshakeMu.Unlock()
+
+	if p.initiatorPending == nil || p.initiatorPending.sessionID != sessionID {
+		return errors.New("no matching initiator handshake")
+	}
+	if err := p.installSession(sessionID, txKey, rxKey); err != nil {
+		return err
+	}
+	p.initiatorPending = nil
+	p.HandshakePending = false
+	p.LastHandshake = time.Now()
+	return nil
+}
+
+func (p *Peer) CompleteResponderHandshake(sessionID uint64) error {
+	p.handshakeMu.Lock()
+	defer p.handshakeMu.Unlock()
+
+	if p.responderPending == nil || p.responderPending.sessionID != sessionID {
+		return errors.New("no matching responder handshake")
+	}
+	if err := p.installSession(
+		sessionID,
+		p.responderPending.keys.ResponderToInitiator,
+		p.responderPending.keys.InitiatorToResponder,
+	); err != nil {
+		return err
+	}
+	p.responderPending = nil
+	p.HandshakePending = false
+	p.LastHandshake = time.Now()
+	return nil
+}
+
+func (p *Peer) AbortHandshake(sessionID uint64) {
+	p.handshakeMu.Lock()
+	defer p.handshakeMu.Unlock()
+	if p.initiatorPending != nil && p.initiatorPending.sessionID == sessionID {
+		p.initiatorPending = nil
+	}
+	if p.responderPending != nil && p.responderPending.sessionID == sessionID {
+		p.responderPending = nil
+	}
+	if p.initiatorPending == nil && p.responderPending == nil {
+		p.HandshakePending = false
+	}
+}
+
+func (p *Peer) installSession(sessionID uint64, txKey, rxKey [tcrypto.KeySize]byte) error {
+	txAEAD, err := tcrypto.NewAEAD(txKey)
+	if err != nil {
+		return err
+	}
+	rxAEAD, err := tcrypto.NewAEAD(rxKey)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	next := &trafficSession{
+		id:        sessionID,
+		txAEAD:    txAEAD,
+		rxAEAD:    rxAEAD,
+		replay:    replay.NewFilter(),
+		createdAt: now,
+	}
+
 	p.cryptoMu.Lock()
 	defer p.cryptoMu.Unlock()
-
-	if p.aead != nil {
-		p.prevAEAD = p.aead
+	if p.current != nil {
+		p.current.expiresAt = now.Add(PreviousKeyGraceTime)
+		p.previous = p.current
 	}
-
-	p.aead = newAEAD
-	p.LastHandshake = time.Now()
-	p.HandshakePending = false
+	p.current = next
+	p.prunePreviousLocked(now)
+	return nil
 }
 
-func (p *Peer) ValidateReplay(counter uint64) bool {
-	return p.replayFilter.ValidateAndUpdate(counter)
+func (p *Peer) NextOutbound() (sessionID uint64, aead cipher.AEAD, counter uint64, ok bool) {
+	p.cryptoMu.RLock()
+	current := p.current
+	p.cryptoMu.RUnlock()
+	if current == nil {
+		return 0, nil, 0, false
+	}
+
+	counter = current.txCounter.Add(1)
+	if counter == 0 {
+		return 0, nil, 0, false
+	}
+	return current.id, current.txAEAD, counter, true
+}
+
+func (p *Peer) Open(
+	sessionID uint64,
+	dst, nonce, ciphertext, additionalData []byte,
+	counter uint64,
+) ([]byte, error) {
+	p.cryptoMu.Lock()
+	now := time.Now()
+	p.prunePreviousLocked(now)
+
+	var candidate *trafficSession
+	switch {
+	case p.current != nil && p.current.id == sessionID:
+		candidate = p.current
+	case p.previous != nil && p.previous.id == sessionID:
+		candidate = p.previous
+	default:
+		p.cryptoMu.Unlock()
+		return nil, errors.New("unknown or expired session")
+	}
+	p.cryptoMu.Unlock()
+
+	plaintext, err := candidate.rxAEAD.Open(dst, nonce, ciphertext, additionalData)
+	if err != nil {
+		return nil, err
+	}
+	if !candidate.replay.ValidateAndUpdate(counter) {
+		return nil, errors.New("replayed packet")
+	}
+	return plaintext, nil
+}
+
+func (p *Peer) CurrentSessionID() uint64 {
+	p.cryptoMu.RLock()
+	defer p.cryptoMu.RUnlock()
+	if p.current == nil {
+		return 0
+	}
+	return p.current.id
+}
+
+func (p *Peer) PreviousSessionID() uint64 {
+	p.cryptoMu.Lock()
+	defer p.cryptoMu.Unlock()
+	p.prunePreviousLocked(time.Now())
+	if p.previous == nil {
+		return 0
+	}
+	return p.previous.id
+}
+
+func (p *Peer) ExpirePreviousForTest() {
+	p.cryptoMu.Lock()
+	defer p.cryptoMu.Unlock()
+	if p.previous != nil {
+		p.previous.expiresAt = time.Now().Add(-time.Second)
+	}
+	p.prunePreviousLocked(time.Now())
+}
+
+func (p *Peer) prunePreviousLocked(now time.Time) {
+	if p.previous != nil && !p.previous.expiresAt.IsZero() && !now.Before(p.previous.expiresAt) {
+		p.previous = nil
+	}
 }
 
 func (p *Peer) SetCookie(cookie []byte) {
@@ -206,7 +367,7 @@ func (p *Peer) GetCookie() []byte {
 		p.LastCookie = nil
 		return nil
 	}
-	return p.LastCookie
+	return append([]byte(nil), p.LastCookie...)
 }
 
 var _ = cpu.CacheLinePad{}

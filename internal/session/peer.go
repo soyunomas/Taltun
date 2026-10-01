@@ -21,6 +21,7 @@ const (
 	RekeyInterval        = 2 * time.Minute
 	KeepaliveTimeout     = 10 * time.Second
 	PreviousKeyGraceTime = 30 * time.Second
+	NotifyInterval       = 5 * time.Second
 )
 
 type trafficSession struct {
@@ -54,6 +55,7 @@ type Peer struct {
 	VirtualIP uint32
 	PublicKey [tcrypto.KeySize]byte
 	allowedSources []ipv4Prefix
+	lighthouse bool
 
 	cryptoMu sync.RWMutex
 	current  *trafficSession
@@ -74,8 +76,9 @@ type Peer struct {
 	endpointMu sync.RWMutex
 	endpoint   *net.UDPAddr
 
-	lastSent time.Time
-	lastRx   time.Time
+	lastSentNano atomic.Int64
+	lastRxNano   atomic.Int64
+	lastNotifyNano atomic.Int64
 
 	_ [cacheLineSize]byte
 
@@ -87,13 +90,15 @@ type Peer struct {
 }
 
 func NewPeer(vip uint32, endpoint *net.UDPAddr, publicKey [tcrypto.KeySize]byte) *Peer {
-	return &Peer{
+	p := &Peer{
 		VirtualIP: vip,
 		PublicKey: publicKey,
 		endpoint:  endpoint,
-		lastSent:  time.Now(),
-		lastRx:    time.Now(),
 	}
+	now := time.Now().UnixNano()
+	p.lastSentNano.Store(now)
+	p.lastRxNano.Store(now)
+	return p
 }
 
 func (p *Peer) SetAllowedSources(cidrs []string) error {
@@ -137,6 +142,27 @@ func (p *Peer) AllowsSource(ip uint32) bool {
 	return false
 }
 
+func (p *Peer) SetLighthouse(v bool) {
+	p.lighthouse = v
+}
+
+func (p *Peer) IsLighthouse() bool {
+	return p.lighthouse
+}
+
+func (p *Peer) ShouldNotify() bool {
+	now := time.Now().UnixNano()
+	for {
+		last := p.lastNotifyNano.Load()
+		if last != 0 && time.Duration(now-last) < NotifyInterval {
+			return false
+		}
+		if p.lastNotifyNano.CompareAndSwap(last, now) {
+			return true
+		}
+	}
+}
+
 func (p *Peer) MatchesPublicKey(publicKey []byte) bool {
 	if len(publicKey) != len(p.PublicKey) {
 		return false
@@ -157,16 +183,20 @@ func (p *Peer) SetEndpoint(addr *net.UDPAddr) {
 }
 
 func (p *Peer) UpdateTimestamps(isRx bool) {
-	now := time.Now()
+	now := time.Now().UnixNano()
 	if isRx {
-		p.lastRx = now
+		p.lastRxNano.Store(now)
 	} else {
-		p.lastSent = now
+		p.lastSentNano.Store(now)
 	}
 }
 
 func (p *Peer) NeedsKeepalive() bool {
-	return time.Since(p.lastSent) > KeepaliveTimeout
+	last := p.lastSentNano.Load()
+	if last == 0 {
+		return true
+	}
+	return time.Since(time.Unix(0, last)) > KeepaliveTimeout
 }
 
 func (p *Peer) NeedsRekey() bool {

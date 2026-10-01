@@ -115,6 +115,8 @@ Acceptance:
 - Only peers locally configured with `lighthouse = true` may issue discovery updates.
 - A Lighthouse update is only a candidate endpoint: the target endpoint is not installed until a fresh authenticated v2 handshake succeeds.
 - Lighthouse notifications are rate-limited atomically.
+- Lighthouse connectivity is relay-first and now has end-to-end NAT coverage: direct /32 promotion requires authenticated return traffic, stale direct paths fall back after 30 seconds, and relay traffic can recover P2P.
+- The NAT integration uses two endpoint-independent/port-preserving UDP NATs and verifies operation with the Lighthouse service deliberately blocked after P2P promotion. Symmetric NAT is not claimed.
 - Hot activity timestamps are atomic; router readers are lock-free over immutable trees.
 - Engine shutdown closes a shared done channel, stops cookie rotation, closes TUN/UDP resources, and waits for workers via a WaitGroup.
 
@@ -157,6 +159,7 @@ Acceptance:
 
 - CI includes vet, unit tests, race detector, parser fuzzing, build, and a privileged Linux namespace integration job.
 - Namespace integration exercises direct client/hub traffic, client-to-client relay, a routed LAN behind a peer, process restart recovery, and automatic rekey after the default two-minute interval.
+- Lighthouse NAT integration exercises relay baseline, authenticated endpoint discovery, P2P promotion, operation without the Lighthouse service, direct-path failure, relay fallback, and P2P recovery.
 - Performance workflow run `36919598224` produced end-to-end iperf3, latency, loss, pprof, and allocation microbenchmarks.
 - On the 4-vCPU reference runner, 4 UDP workers measured ~1.126 Gbit/s TCP versus ~0.889 Gbit/s with 1 worker; UDP loss at a 1 Gbit/s offered load decreased from ~27.7% to ~9.0%.
 - pprof showed syscall activity dominating flat CPU samples (~66–70%), so no claim is made that crypto or the single TUN stage is the sole bottleneck.

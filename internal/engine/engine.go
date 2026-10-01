@@ -110,7 +110,7 @@ func New(c *config.Config) (*Engine, error) {
 	return e, nil
 }
 
-func (e *Engine) AddPeer(virtualIP net.IP, remoteAddr string, publicKeyHex string, allowedIPs []string) error {
+func (e *Engine) AddPeer(virtualIP net.IP, remoteAddr string, publicKeyHex string, allowedIPs []string, lighthouse bool) error {
 	vip := netutil.IPToUint32(virtualIP)
 	if vip == 0 {
 		return fmt.Errorf("ip virtual invalida")
@@ -135,6 +135,7 @@ func (e *Engine) AddPeer(virtualIP net.IP, remoteAddr string, publicKeyHex strin
 	}
 
 	p := session.NewPeer(vip, udpAddr, publicKey)
+	p.SetLighthouse(lighthouse)
 	if err := p.SetAllowedSources(allowedIPs); err != nil {
 		return fmt.Errorf("allowed_ips invalidas para %s: %w", virtualIP, err)
 	}

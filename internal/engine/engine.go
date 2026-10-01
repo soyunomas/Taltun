@@ -153,7 +153,11 @@ func (e *Engine) AddPeer(virtualIP net.IP, remoteAddr string, publicKeyHex strin
 	newMap[vip] = p
 	e.peers.Store(&newMap)
 
-	e.router.Insert(fmt.Sprintf("%s/32", virtualIP.String()), p)
+	if udpAddr != nil {
+		if err := e.router.Insert(fmt.Sprintf("%s/32", virtualIP.String()), p); err != nil {
+			return fmt.Errorf("ruta VIP invalida para %s: %w", virtualIP, err)
+		}
+	}
 
 	for _, cidr := range allowedIPs {
 		if err := e.router.Insert(cidr, p); err != nil {
@@ -165,6 +169,18 @@ func (e *Engine) AddPeer(virtualIP net.IP, remoteAddr string, publicKeyHex strin
 
 	log.Printf("🔗 Peer Configurado: VIP=%s Endpoint=%v AllowedIPs=%d", virtualIP, remoteAddr, len(allowedIPs))
 	return nil
+}
+
+func (e *Engine) promotePeerRoute(p *PeerInfo) {
+	if p == nil || p.GetEndpoint() == nil {
+		return
+	}
+	cidr := fmt.Sprintf("%s/32", netutil.Uint32ToIP(p.VirtualIP))
+	if err := e.router.Insert(cidr, p); err != nil {
+		if e.cfg.Debug {
+			log.Printf("no se pudo promocionar ruta %s: %v", cidr, err)
+		}
+	}
 }
 
 func (e *Engine) Initialize() error {

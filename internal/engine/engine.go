@@ -212,7 +212,10 @@ func (e *Engine) Initialize() error {
 		log.Println("💡 Iniciando en modo lighthouse sin interfaz TUN")
 	}
 
-	numCPU := runtime.NumCPU()
+	numCPU := e.cfg.Workers
+	if numCPU <= 0 {
+		numCPU = runtime.NumCPU()
+	}
 	e.pconns = make([]*ipv4.PacketConn, numCPU)
 	e.rawConns = make([]*net.UDPConn, numCPU)
 
@@ -469,7 +472,7 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 				ep := p.GetEndpoint()
 				if ep != nil && ep.IP.Equal(rAddr.IP) && ep.Port == rAddr.Port {
 					p.SetCookie(cookieBytes)
-					go e.sendHandshakeInit(p)
+					e.sendHandshakeInit(p)
 					break
 				}
 			}

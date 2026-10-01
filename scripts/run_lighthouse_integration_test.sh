@@ -79,23 +79,26 @@ attach_external "${NS_NAT_A}" nata-host ext0 203.0.113.2
 attach_external "${NS_NAT_B}" natb-host ext0 203.0.113.3
 
 create_inside() {
-  local natns="$1" clientns="$2" nat_if="$3" client_if="$4" nat_addr="$5" client_addr="$6"
+  local natns="$1" clientns="$2" tag="$3" nat_addr="$4" client_addr="$5"
+  local nat_tmp="v-${tag}-nat" client_tmp="v-${tag}-cli"
   ip netns add "${clientns}"
-  ip link add "${nat_if}" type veth peer name "${client_if}"
-  ip link set "${nat_if}" netns "${natns}"
-  ip link set "${client_if}" netns "${clientns}"
+  ip link add "${nat_tmp}" type veth peer name "${client_tmp}"
+  ip link set "${nat_tmp}" netns "${natns}"
+  ip link set "${client_tmp}" netns "${clientns}"
 
-  ip netns exec "${natns}" ip addr add "${nat_addr}/24" dev "${nat_if}"
-  ip netns exec "${natns}" ip link set "${nat_if}" up
+  ip netns exec "${natns}" ip link set "${nat_tmp}" name lan0
+  ip netns exec "${natns}" ip addr add "${nat_addr}/24" dev lan0
+  ip netns exec "${natns}" ip link set lan0 up
 
+  ip netns exec "${clientns}" ip link set "${client_tmp}" name eth0
   ip netns exec "${clientns}" ip link set lo up
-  ip netns exec "${clientns}" ip addr add "${client_addr}/24" dev "${client_if}"
-  ip netns exec "${clientns}" ip link set "${client_if}" up
-  ip netns exec "${clientns}" ip route add default via "${nat_addr}"
+  ip netns exec "${clientns}" ip addr add "${client_addr}/24" dev eth0
+  ip netns exec "${clientns}" ip link set eth0 up
+  ip netns exec "${clientns}" ip route replace default via "${nat_addr}"
 }
 
-create_inside "${NS_NAT_A}" "${NS_A}" lan0 eth0 10.10.1.1 10.10.1.2
-create_inside "${NS_NAT_B}" "${NS_B}" lan0 eth0 10.20.1.1 10.20.1.2
+create_inside "${NS_NAT_A}" "${NS_A}" a 10.10.1.1 10.10.1.2
+create_inside "${NS_NAT_B}" "${NS_B}" b 10.20.1.1 10.20.1.2
 
 configure_nat() {
   local ns="$1"

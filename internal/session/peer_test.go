@@ -2,9 +2,11 @@ package session
 
 import (
 	"encoding/binary"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	tcrypto "github.com/Soyunomas/taltun/pkg/crypto"
 	"github.com/Soyunomas/taltun/pkg/protocol"
@@ -242,5 +244,32 @@ func TestShouldNotifyRateLimitsAtomically(t *testing.T) {
 	wg.Wait()
 	if got := wins.Load(); got != 1 {
 		t.Fatalf("notify winners = %d, want 1", got)
+	}
+}
+
+
+func TestNeedsHandshakeRetriesLostInitialPacket(t *testing.T) {
+	var public [tcrypto.KeySize]byte
+	p := NewPeer(1, &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 9000}, public)
+
+	if !p.NeedsHandshake() {
+		t.Fatal("peer without a session should need an initial handshake")
+	}
+
+	eph, err := tcrypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.BeginInitiatorHandshake(123, eph)
+	if p.NeedsHandshake() {
+		t.Fatal("fresh pending handshake should not be retried immediately")
+	}
+
+	p.handshakeMu.Lock()
+	p.LastHandshakeAttempt = time.Now().Add(-HandshakeRetryInterval - time.Millisecond)
+	p.handshakeMu.Unlock()
+
+	if !p.NeedsHandshake() {
+		t.Fatal("lost pending handshake should be retried after timeout")
 	}
 }

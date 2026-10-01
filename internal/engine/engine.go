@@ -327,7 +327,7 @@ func (e *Engine) housekeepingWorker(ctx context.Context) error {
 		case <-ticker.C:
 			currentPeers := *e.peers.Load()
 			for _, p := range currentPeers {
-				if p.NeedsRekey() {
+				if p.NeedsHandshake() {
 					e.sendHandshakeInit(p)
 				}
 				if p.NeedsKeepalive() {

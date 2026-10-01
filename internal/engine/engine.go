@@ -334,6 +334,38 @@ func (e *Engine) housekeepingWorker(ctx context.Context) error {
 					e.sendKeepalive(p)
 				}
 			}
+			e.reconcileLighthouseFallback(currentPeers)
+		}
+	}
+}
+
+func (e *Engine) reconcileLighthouseFallback(peers PeerMap) {
+	if e.cfg.Mode == "lighthouse" {
+		return
+	}
+
+	var lighthouse *PeerInfo
+	for _, candidate := range peers {
+		if candidate.IsLighthouse() && candidate.GetEndpoint() != nil && candidate.CurrentSessionID() != 0 {
+			lighthouse = candidate
+			break
+		}
+	}
+	if lighthouse == nil {
+		return
+	}
+
+	for _, p := range peers {
+		if p == lighthouse || p.IsLighthouse() || p.GetEndpoint() == nil || p.CurrentSessionID() == 0 {
+			continue
+		}
+		if !p.ReceiveStale(session.DirectFallbackTimeout) {
+			continue
+		}
+
+		cidr := fmt.Sprintf("%s/32", netutil.Uint32ToIP(p.VirtualIP))
+		if err := e.router.Insert(cidr, lighthouse); err == nil && e.cfg.Debug {
+			log.Printf("↩️ Lighthouse fallback: %s via %s", netutil.Uint32ToIP(p.VirtualIP), netutil.Uint32ToIP(lighthouse.VirtualIP))
 		}
 	}
 }

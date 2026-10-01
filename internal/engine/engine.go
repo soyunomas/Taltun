@@ -588,7 +588,12 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 		peer.SetEndpoint(newEP)
 	}
 
-	peer.UpdateTimestamps(true) 
+	peer.UpdateTimestamps(true)
+	if !peer.IsLighthouse() && peer.VirtualIP != e.localVIP {
+		// Any successfully authenticated packet from a non-lighthouse peer confirms
+		// that the direct session is usable end-to-end.
+		e.promotePeerRoute(peer)
+	}
 
 	if len(plaintext) == 0 {
 		pool.Put(plaintextBufPtr)

@@ -22,6 +22,7 @@ const (
 	KeepaliveTimeout     = 10 * time.Second
 	PreviousKeyGraceTime = 30 * time.Second
 	NotifyInterval       = 5 * time.Second
+	HandshakeRetryInterval = 2 * time.Second
 )
 
 type trafficSession struct {
@@ -64,8 +65,9 @@ type Peer struct {
 	handshakeMu        sync.Mutex
 	initiatorPending   *pendingInitiator
 	responderPending   *pendingResponder
-	LastHandshake      time.Time
-	HandshakePending   bool
+	LastHandshake        time.Time
+	LastHandshakeAttempt time.Time
+	HandshakePending     bool
 
 	cookieMu   sync.Mutex
 	LastCookie []byte
@@ -199,6 +201,28 @@ func (p *Peer) NeedsKeepalive() bool {
 	return time.Since(time.Unix(0, last)) > KeepaliveTimeout
 }
 
+func (p *Peer) NeedsHandshake() bool {
+	if p.GetEndpoint() == nil {
+		return false
+	}
+
+	p.cryptoMu.RLock()
+	current := p.current
+	p.cryptoMu.RUnlock()
+
+	p.handshakeMu.Lock()
+	defer p.handshakeMu.Unlock()
+
+	now := time.Now()
+	if p.HandshakePending {
+		return p.LastHandshakeAttempt.IsZero() || now.Sub(p.LastHandshakeAttempt) >= HandshakeRetryInterval
+	}
+	if current == nil {
+		return true
+	}
+	return now.Sub(p.LastHandshake) >= RekeyInterval
+}
+
 func (p *Peer) NeedsRekey() bool {
 	p.cryptoMu.RLock()
 	current := p.current
@@ -222,6 +246,7 @@ func (p *Peer) BeginInitiatorHandshake(sessionID uint64, ephemeral *tcrypto.KeyP
 		sessionID: sessionID,
 		ephemeral: ephemeral,
 	}
+	p.LastHandshakeAttempt = time.Now()
 	p.HandshakePending = true
 }
 
@@ -285,6 +310,7 @@ func (p *Peer) CompleteInitiatorHandshake(sessionID uint64, txKey, rxKey [tcrypt
 	}
 	p.initiatorPending = nil
 	p.HandshakePending = false
+	p.LastHandshakeAttempt = time.Time{}
 	p.LastHandshake = time.Now()
 	return nil
 }
@@ -305,6 +331,7 @@ func (p *Peer) CompleteResponderHandshake(sessionID uint64) error {
 	}
 	p.responderPending = nil
 	p.HandshakePending = false
+	p.LastHandshakeAttempt = time.Time{}
 	p.LastHandshake = time.Now()
 	return nil
 }
@@ -320,6 +347,7 @@ func (p *Peer) AbortHandshake(sessionID uint64) {
 	}
 	if p.initiatorPending == nil && p.responderPending == nil {
 		p.HandshakePending = false
+		p.LastHandshakeAttempt = time.Time{}
 	}
 }
 

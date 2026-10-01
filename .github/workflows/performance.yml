@@ -1,0 +1,63 @@
+name: Performance
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/performance.yml"
+      - "scripts/bench_throughput.sh"
+      - "internal/engine/**"
+      - "internal/session/**"
+      - "pkg/protocol/**"
+      - "pkg/router/**"
+
+permissions:
+  contents: read
+
+jobs:
+  microbench:
+    name: Go microbenchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Bench with allocations
+        run: go test -run=^$ -bench=. -benchmem ./pkg/... ./internal/session/... | tee go-bench.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: go-microbench
+          path: go-bench.txt
+
+  tunnel:
+    name: Tunnel benchmark workers=${{ matrix.workers }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        workers: [1, 0]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install benchmark dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 iputils-ping iperf3 jq curl kmod
+      - name: Run tunnel benchmark
+        run: |
+          chmod +x scripts/bench_throughput.sh
+          mkdir -p "benchmark-results-${{ matrix.workers }}"
+          sudo env "PATH=$PATH" "GITHUB_SHA=$GITHUB_SHA" "WORKERS=${{ matrix.workers }}" "BENCH_OUT=$PWD/benchmark-results-${{ matrix.workers }}" ./scripts/bench_throughput.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tunnel-workers-${{ matrix.workers }}
+          path: benchmark-results-${{ matrix.workers }}/

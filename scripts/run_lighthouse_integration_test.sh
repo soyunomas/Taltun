@@ -101,13 +101,19 @@ create_inside "${NS_NAT_A}" "${NS_A}" a 10.10.1.1 10.10.1.2
 create_inside "${NS_NAT_B}" "${NS_B}" b 10.20.1.1 10.20.1.2
 
 configure_nat() {
-  local ns="$1"
+  local ns="$1" inside_ip="$2" public_ip="$3"
   ip netns exec "${ns}" sysctl -q -w net.ipv4.ip_forward=1
   ip netns exec "${ns}" iptables -P FORWARD ACCEPT
-  ip netns exec "${ns}" iptables -t nat -A POSTROUTING -o ext0 -j MASQUERADE
+
+  # Endpoint-independent, port-preserving UDP mapping for Taltun. This models
+  # the NAT class where hole punching is expected to work. A separate firewall
+  # phase below intentionally blocks the peer-to-peer path to validate relay
+  # fallback when direct connectivity is unavailable.
+  ip netns exec "${ns}" iptables -t nat -A POSTROUTING     -s "${inside_ip}" -p udp --sport 9000 -o ext0     -j SNAT --to-source "${public_ip}:9000"
+  ip netns exec "${ns}" iptables -t nat -A PREROUTING     -i ext0 -d "${public_ip}" -p udp --dport 9000     -j DNAT --to-destination "${inside_ip}:9000"
 }
-configure_nat "${NS_NAT_A}"
-configure_nat "${NS_NAT_B}"
+configure_nat "${NS_NAT_A}" 10.10.1.2 203.0.113.2
+configure_nat "${NS_NAT_B}" 10.20.1.2 203.0.113.3
 
 cat >"${TMP}/lh.toml" <<EOF
 [interface]

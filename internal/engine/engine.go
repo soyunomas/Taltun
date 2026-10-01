@@ -135,6 +135,9 @@ func (e *Engine) AddPeer(virtualIP net.IP, remoteAddr string, publicKeyHex strin
 	}
 
 	p := session.NewPeer(vip, udpAddr, publicKey)
+	if err := p.SetAllowedSources(allowedIPs); err != nil {
+		return fmt.Errorf("allowed_ips invalidas para %s: %w", virtualIP, err)
+	}
 
 	e.peersWriteMu.Lock()
 	defer e.peersWriteMu.Unlock()
@@ -463,6 +466,17 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 	}
 
 	pool.Put(originalBuff)
+
+	if len(plaintext) > 0 {
+		sourceIP := netutil.ExtractSrcIP(plaintext)
+		if !peer.AllowsSource(sourceIP) {
+			pool.Put(plaintextBufPtr)
+			if e.cfg.Debug {
+				log.Printf("DROP ingress: peer %s intento originar %s", netutil.Uint32ToIP(senderVIP), netutil.Uint32ToIP(sourceIP))
+			}
+			return
+		}
+	}
 
 	currentEP := peer.GetEndpoint()
 	shouldUpdate := false

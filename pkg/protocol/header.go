@@ -5,55 +5,54 @@ import (
 	"errors"
 )
 
-// Constantes de tamaño y offsets
 const (
-	HeaderSize = 17 // 1 Type + 4 SessionID + 12 Nonce
+	HeaderSize = 25 // 1 Type + 4 SenderVIP + 8 SessionID + 12 Nonce
 	NonceSize  = 12
 )
 
-// Tipos de paquete
 const (
-	MsgTypeHandshakeInit  uint8 = 0x01 // Cliente -> Servidor (Hola, esta es mi PubKey)
-	MsgTypeHandshakeResp  uint8 = 0x02 // Servidor -> Cliente (Hola, esta es la mia)
-	MsgTypeData           uint8 = 0x03 // Tráfico VPN Cifrado
-	MsgTypeCookieReply    uint8 = 0x04 // Servidor -> Cliente (Estás rate-limited, usa esta cookie)
+	MsgTypeHandshakeInit   uint8 = 0x01
+	MsgTypeHandshakeResp   uint8 = 0x02
+	MsgTypeData            uint8 = 0x03
+	MsgTypeCookieReply     uint8 = 0x04
+	MsgTypeHandshakeFinish uint8 = 0x05
 )
 
-var (
-	ErrBufferTooSmall = errors.New("buffer too small for header")
-)
+var ErrBufferTooSmall = errors.New("buffer too small for header")
 
-// EncodeDataHeader escribe la cabecera en el buffer dst.
-func EncodeDataHeader(dst []byte, sessionID uint32, nonce []byte) (int, error) {
+func EncodeDataHeader(dst []byte, senderVIP uint32, sessionID uint64, nonce []byte) (int, error) {
 	if len(dst) < HeaderSize {
 		return 0, ErrBufferTooSmall
+	}
+	if sessionID == 0 {
+		return 0, errors.New("invalid zero session id")
 	}
 	if len(nonce) != NonceSize {
 		return 0, errors.New("invalid nonce size")
 	}
 
 	dst[0] = MsgTypeData
-	binary.BigEndian.PutUint32(dst[1:5], sessionID)
-	copy(dst[5:17], nonce)
-
+	binary.BigEndian.PutUint32(dst[1:5], senderVIP)
+	binary.BigEndian.PutUint64(dst[5:13], sessionID)
+	copy(dst[13:25], nonce)
 	return HeaderSize, nil
 }
 
-// ParseHeader lee la cabecera del buffer src sin alocar memoria.
-func ParseHeader(src []byte) (msgType uint8, sessionID uint32, nonce []byte, payload []byte, err error) {
+func ParseHeader(src []byte) (msgType uint8, senderVIP uint32, sessionID uint64, nonce, payload []byte, err error) {
 	if len(src) < HeaderSize {
-		return 0, 0, nil, nil, ErrBufferTooSmall
+		return 0, 0, 0, nil, nil, ErrBufferTooSmall
 	}
 
 	msgType = src[0]
-	// Para paquetes Data, leemos Session y Nonce.
-	// Para Handshake, el formato será distinto (Type + Payload), pero
-	// podemos reutilizar el parsing básico y luego interpretar el payload según el Type.
-	
-	sessionID = binary.BigEndian.Uint32(src[1:5])
-	nonce = src[5:17]
-	payload = src[17:]
-
-	return msgType, sessionID, nonce, payload, nil
+	if msgType != MsgTypeData {
+		return 0, 0, 0, nil, nil, errors.New("invalid data message type")
+	}
+	senderVIP = binary.BigEndian.Uint32(src[1:5])
+	sessionID = binary.BigEndian.Uint64(src[5:13])
+	if sessionID == 0 {
+		return 0, 0, 0, nil, nil, errors.New("invalid zero session id")
+	}
+	nonce = src[13:25]
+	payload = src[25:]
+	return msgType, senderVIP, sessionID, nonce, payload, nil
 }
-

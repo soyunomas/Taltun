@@ -52,7 +52,7 @@ func main() {
 		}
 		
 		// Inyección de AllowedIPs
-		if err := srv.AddPeer(vip, p.Endpoint, p.AllowedIPs); err != nil {
+		if err := srv.AddPeer(vip, p.Endpoint, p.PublicKey, p.AllowedIPs); err != nil {
 			log.Printf("⚠️ Error añadiendo peer %s: %v", p.VIP, err)
 		} else {
 			peersAdded++

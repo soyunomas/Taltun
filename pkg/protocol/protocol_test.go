@@ -73,3 +73,50 @@ func BenchmarkEncodeHeader(b *testing.B) {
 		_, _ = EncodeDataHeader(buf, sid, nonce)
 	}
 }
+
+
+func TestHandshakeRoundTripWithAuthTagAndCookie(t *testing.T) {
+	buf := make([]byte, 256)
+	pub := make([]byte, 32)
+	auth := make([]byte, AuthTagSize)
+	cookie := make([]byte, CookieSize)
+	for i := range pub {
+		pub[i] = byte(i + 1)
+	}
+	for i := range auth {
+		auth[i] = byte(0xa0 + i%16)
+	}
+	for i := range cookie {
+		cookie[i] = byte(0x10 + i)
+	}
+
+	n, err := EncodeHandshake(buf, MsgTypeHandshakeInit, 0x0a000002, pub, auth, cookie)
+	if err != nil {
+		t.Fatalf("EncodeHandshake: %v", err)
+	}
+
+	vip, gotPub, gotAuth, gotCookie, err := ParseHandshake(buf[:n])
+	if err != nil {
+		t.Fatalf("ParseHandshake: %v", err)
+	}
+	if vip != 0x0a000002 {
+		t.Fatalf("VIP = %x", vip)
+	}
+	if string(gotPub) != string(pub) {
+		t.Fatal("public key mismatch")
+	}
+	if string(gotAuth) != string(auth) {
+		t.Fatal("auth tag mismatch")
+	}
+	if string(gotCookie) != string(cookie) {
+		t.Fatal("cookie mismatch")
+	}
+}
+
+func TestHandshakeRejectsMissingAuthTag(t *testing.T) {
+	buf := make([]byte, 37)
+	buf[0] = MsgTypeHandshakeInit
+	if _, _, _, _, err := ParseHandshake(buf); err == nil {
+		t.Fatal("expected legacy unauthenticated handshake to be rejected")
+	}
+}

@@ -2,7 +2,10 @@ package engine
 
 import (
 	"encoding/binary"
+	"log"
 	"net"
+
+	"github.com/Soyunomas/taltun/pkg/netutil"
 
 	"github.com/Soyunomas/taltun/pkg/pool"
 	"github.com/Soyunomas/taltun/pkg/protocol"
@@ -40,6 +43,10 @@ func (e *Engine) processPeerUpdatePacket(pkt []byte, rAddr *net.UDPAddr) {
 	target := currentPeers[targetVIP]
 	if target == nil || target == lighthouse {
 		return
+	}
+	if e.cfg.Debug {
+		log.Printf("🗼 PeerUpdate from=%s target=%s candidate=%v",
+			netutil.Uint32ToIP(senderVIP), netutil.Uint32ToIP(targetVIP), candidate)
 	}
 
 	// The update is only a discovery hint. Trust moves to the candidate endpoint

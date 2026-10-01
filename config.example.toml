@@ -31,6 +31,10 @@ vip = "10.0.0.1"
 public_key = "CLAVE_PUBLICA_X25519_DEL_PEER_64_HEX"
 endpoint = "203.0.113.1:9000"
 
+# Marca únicamente al peer que actúa como Lighthouse de confianza.
+# Sus PeerUpdate se aceptan sólo dentro de una sesión v2 autenticada.
+lighthouse = false
+
 # Ejemplo: Otro cliente (si hubiera P2P directo o known route)
 # [[peers]]
 # vip = "10.0.0.3"

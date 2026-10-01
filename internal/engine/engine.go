@@ -81,7 +81,6 @@ type Engine struct {
 	handshakeCh chan HandshakeRequest
 	txCh        chan *TxBatch
 	
-	txCounter   uint64
 	closed atomic.Bool
 }
 
@@ -284,27 +283,31 @@ func (e *Engine) housekeepingWorker(ctx context.Context) error {
 }
 
 func (e *Engine) sendKeepalive(p *PeerInfo) {
-	aead := p.GetAEAD()
 	endpoint := p.GetEndpoint()
-	if aead == nil || endpoint == nil {
+	sessionID, aead, counter, ok := p.NextOutbound()
+	if !ok || endpoint == nil {
 		return
 	}
 
 	pkt := pool.Get()
 	defer pool.Put(pkt)
 
-	nonceBuf := make([]byte, protocol.NonceSize)
-	copy(nonceBuf[0:4], []byte{0xCA, 0xFE, 0xBA, 0xBE})
-	ctr := atomic.AddUint64(&e.txCounter, 1)
-	binary.BigEndian.PutUint64(nonceBuf[4:], ctr)
+	var nonceBuf [protocol.NonceSize]byte
+	binary.BigEndian.PutUint64(nonceBuf[4:], counter)
+	if _, err := protocol.EncodeDataHeader(pkt[:], e.localVIP, sessionID, nonceBuf[:]); err != nil {
+		return
+	}
 
-	protocol.EncodeDataHeader(pkt[:], e.localVIP, nonceBuf)
-	
-	encrypted := aead.Seal(pkt[protocol.HeaderSize:protocol.HeaderSize], nonceBuf, nil, nil)
+	encrypted := aead.Seal(
+		pkt[protocol.HeaderSize:protocol.HeaderSize],
+		nonceBuf[:],
+		nil,
+		pkt[:protocol.HeaderSize],
+	)
 	totalLen := protocol.HeaderSize + len(encrypted)
 
 	if len(e.rawConns) > 0 {
-		e.rawConns[0].WriteToUDP(pkt[:totalLen], endpoint)
+		_, _ = e.rawConns[0].WriteToUDP(pkt[:totalLen], endpoint)
 		p.UpdateTimestamps(false)
 	}
 }
@@ -356,16 +359,20 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 	msgType := pkt[0]
 
 	// 1. Control Plane
-	if msgType == protocol.MsgTypeHandshakeInit || msgType == protocol.MsgTypeHandshakeResp {
+	if msgType == protocol.MsgTypeHandshakeInit || msgType == protocol.MsgTypeHandshakeResp || msgType == protocol.MsgTypeHandshakeFinish {
 		underLoad := len(e.handshakeCh) > 250
-		
-		_, _, _, cookie, err := protocol.ParseHandshake(pkt)
-		if err != nil {
-			pool.Put(originalBuff)
-			return
+
+		var cookie []byte
+		if msgType != protocol.MsgTypeHandshakeFinish {
+			h, err := protocol.ParseHandshake(pkt)
+			if err != nil {
+				pool.Put(originalBuff)
+				return
+			}
+			cookie = h.Cookie
 		}
 
-		if underLoad {
+		if underLoad && msgType == protocol.MsgTypeHandshakeInit {
 			validCookie := false
 			if len(cookie) > 0 {
 				if e.cookieProtector.ValidateCookie(rAddr.IP, cookie) {
@@ -413,7 +420,7 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 	}
 
 	// 2. Data Plane (Hot Path)
-	_, senderVIP, nonce, ciphertext, err := protocol.ParseHeader(pkt)
+	_, senderVIP, sessionID, nonce, ciphertext, err := protocol.ParseHeader(pkt)
 	if err != nil {
 		pool.Put(originalBuff)
 		return
@@ -441,22 +448,22 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 	plaintextBufPtr := pool.Get()
 	
 	// Abrir cifrado dejando Headroom para TUN (offset 16)
-	plaintext, err := peer.Open(plaintextBufPtr[TunHeadroom:TunHeadroom], nonce, ciphertext, nil)
+	counter := binary.BigEndian.Uint64(nonce[4:12])
+	plaintext, err := peer.Open(
+		sessionID,
+		plaintextBufPtr[TunHeadroom:TunHeadroom],
+		nonce,
+		ciphertext,
+		pkt[:protocol.HeaderSize],
+		counter,
+	)
 	if err != nil {
 		pool.Put(plaintextBufPtr)
 		pool.Put(originalBuff)
 		return
 	}
-	
-	pool.Put(originalBuff)
 
-	if len(nonce) >= 12 {
-		counter := binary.BigEndian.Uint64(nonce[4:12])
-		if !peer.ValidateReplay(counter) {
-			pool.Put(plaintextBufPtr)
-			return
-		}
-	}
+	pool.Put(originalBuff)
 
 	currentEP := peer.GetEndpoint()
 	shouldUpdate := false
@@ -522,9 +529,9 @@ func writeToTun(e *Engine, plaintext []byte, buff *pool.Buff) {
 
 func (e *Engine) sendRelay(plaintext []byte, buff *pool.Buff, peer *PeerInfo) {
 	endpoint := peer.GetEndpoint()
-	aead := peer.GetAEAD()
+	sessionID, aead, counter, ok := peer.NextOutbound()
 
-	if endpoint == nil || aead == nil {
+	if endpoint == nil || !ok {
 		pool.Put(buff)
 		return
 	}
@@ -537,14 +544,20 @@ func (e *Engine) sendRelay(plaintext []byte, buff *pool.Buff, peer *PeerInfo) {
 	copy(outBuf[offset:], plaintext)
 	pool.Put(buff)
 
-	nonceBuf := make([]byte, protocol.NonceSize) 
-	copy(nonceBuf[0:4], []byte{0xCA, 0xFE, 0xBA, 0xBE})
-	ctr := atomic.AddUint64(&e.txCounter, 1)
-	binary.BigEndian.PutUint64(nonceBuf[4:], ctr)
+	var nonceBuf [protocol.NonceSize]byte
+	binary.BigEndian.PutUint64(nonceBuf[4:], counter)
 
-	protocol.EncodeDataHeader(outBuf[:offset], e.localVIP, nonceBuf)
+	if _, err := protocol.EncodeDataHeader(outBuf[:offset], e.localVIP, sessionID, nonceBuf[:]); err != nil {
+		pool.Put(outBufPtr)
+		return
+	}
 
-	encrypted := aead.Seal(outBuf[offset:offset], nonceBuf, outBuf[offset:offset+len(plaintext)], nil)
+	encrypted := aead.Seal(
+		outBuf[offset:offset],
+		nonceBuf[:],
+		outBuf[offset:offset+len(plaintext)],
+		outBuf[:offset],
+	)
 	totalLen := offset + len(encrypted)
 
 	atomic.AddUint64(&peer.BytesTx, uint64(len(encrypted)))
@@ -635,9 +648,9 @@ func (e *Engine) loopTunReadAndEncrypt() error {
 			}
 
 			endpoint := peer.GetEndpoint()
-			aead := peer.GetAEAD()
+			sessionID, aead, counter, ok := peer.NextOutbound()
 
-			if endpoint == nil || aead == nil {
+			if endpoint == nil || !ok {
 				continue
 			}
 
@@ -645,14 +658,19 @@ func (e *Engine) loopTunReadAndEncrypt() error {
 			outBuf := outBufPtr[:]
 			copy(outBuf[offset:], packetData)
 
-			nonceBuf := make([]byte, protocol.NonceSize)
-			copy(nonceBuf[0:4], []byte{0xCA, 0xFE, 0xBA, 0xBE})
+			var nonceBuf [protocol.NonceSize]byte
+			binary.BigEndian.PutUint64(nonceBuf[4:], counter)
+			if _, err := protocol.EncodeDataHeader(outBuf[:offset], e.localVIP, sessionID, nonceBuf[:]); err != nil {
+				pool.Put(outBufPtr)
+				continue
+			}
 
-			ctr := atomic.AddUint64(&e.txCounter, 1)
-			binary.BigEndian.PutUint64(nonceBuf[4:], ctr)
-			protocol.EncodeDataHeader(outBuf[:offset], e.localVIP, nonceBuf)
-
-			encrypted := aead.Seal(outBuf[offset:offset], nonceBuf, outBuf[offset:offset+size], nil)
+			encrypted := aead.Seal(
+				outBuf[offset:offset],
+				nonceBuf[:],
+				outBuf[offset:offset+size],
+				outBuf[:offset],
+			)
 			totalLen := offset + len(encrypted)
 
 			atomic.AddUint64(&peer.BytesTx, uint64(len(encrypted)))

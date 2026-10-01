@@ -275,11 +275,15 @@ func (p *Peer) NextOutbound() (sessionID uint64, aead cipher.AEAD, counter uint6
 		return 0, nil, 0, false
 	}
 
-	counter = current.txCounter.Add(1)
-	if counter == 0 {
-		return 0, nil, 0, false
+	for {
+		old := current.txCounter.Load()
+		if old == ^uint64(0) {
+			return 0, nil, 0, false
+		}
+		if current.txCounter.CompareAndSwap(old, old+1) {
+			return current.id, current.txAEAD, old + 1, true
+		}
 	}
-	return current.id, current.txAEAD, counter, true
 }
 
 func (p *Peer) Open(
@@ -322,6 +326,21 @@ func (p *Peer) CurrentSessionID() uint64 {
 	return p.current.id
 }
 
+func (p *Peer) SessionIDInUse(sessionID uint64) bool {
+	if sessionID == 0 {
+		return true
+	}
+
+	p.cryptoMu.Lock()
+	defer p.cryptoMu.Unlock()
+	p.prunePreviousLocked(time.Now())
+
+	if p.current != nil && p.current.id == sessionID {
+		return true
+	}
+	return p.previous != nil && p.previous.id == sessionID
+}
+
 func (p *Peer) PreviousSessionID() uint64 {
 	p.cryptoMu.Lock()
 	defer p.cryptoMu.Unlock()
@@ -330,15 +349,6 @@ func (p *Peer) PreviousSessionID() uint64 {
 		return 0
 	}
 	return p.previous.id
-}
-
-func (p *Peer) ExpirePreviousForTest() {
-	p.cryptoMu.Lock()
-	defer p.cryptoMu.Unlock()
-	if p.previous != nil {
-		p.previous.expiresAt = time.Now().Add(-time.Second)
-	}
-	p.prunePreviousLocked(time.Now())
 }
 
 func (p *Peer) prunePreviousLocked(now time.Time) {

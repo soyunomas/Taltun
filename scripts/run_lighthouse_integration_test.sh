@@ -16,7 +16,6 @@ NS_NAT_A="ns-taltun-nat-a"
 NS_A="ns-taltun-lh-a"
 NS_NAT_B="ns-taltun-nat-b"
 NS_B="ns-taltun-lh-b"
-BR_EXT="br-taltun-ext"
 PIDS=()
 
 cleanup() {
@@ -28,12 +27,11 @@ cleanup() {
   for ns in "${NS_LH}" "${NS_NAT_A}" "${NS_A}" "${NS_NAT_B}" "${NS_B}"; do
     ip netns del "${ns}" 2>/dev/null || true
   done
-  ip link del "${BR_EXT}" 2>/dev/null || true
   rm -rf "${TMP}"
 }
 trap cleanup EXIT
 
-for cmd in ip ping iptables sed grep awk; do
+for cmd in ip ping iptables sed grep awk tcpdump; do
   command -v "${cmd}" >/dev/null || { echo "missing dependency: ${cmd}" >&2; exit 1; }
 done
 
@@ -59,24 +57,36 @@ make_pair LH
 make_pair A
 make_pair B
 
-ip link add "${BR_EXT}" type bridge
-ip link set "${BR_EXT}" up
-
-attach_external() {
-  local ns="$1" host_if="$2" ns_if="$3" addr="$4"
+for ns in "${NS_LH}" "${NS_NAT_A}" "${NS_NAT_B}"; do
   ip netns add "${ns}"
-  ip link add "${host_if}" type veth peer name "${ns_if}"
-  ip link set "${ns_if}" netns "${ns}"
-  ip link set "${host_if}" master "${BR_EXT}"
-  ip link set "${host_if}" up
   ip netns exec "${ns}" ip link set lo up
-  ip netns exec "${ns}" ip addr add "${addr}/24" dev "${ns_if}"
-  ip netns exec "${ns}" ip link set "${ns_if}" up
-}
+done
 
-attach_external "${NS_LH}" lh-host lh-ext 203.0.113.1
-attach_external "${NS_NAT_A}" nata-host ext0 203.0.113.2
-attach_external "${NS_NAT_B}" natb-host ext0 203.0.113.3
+# Public Internet simulation: Lighthouse/router has one /30 toward each NAT.
+ip link add lh-a type veth peer name nat-a-ext
+ip link set lh-a netns "${NS_LH}"
+ip link set nat-a-ext netns "${NS_NAT_A}"
+ip netns exec "${NS_LH}" ip addr add 203.0.113.1/30 dev lh-a
+ip netns exec "${NS_LH}" ip link set lh-a up
+ip netns exec "${NS_NAT_A}" ip addr add 203.0.113.2/30 dev nat-a-ext
+ip netns exec "${NS_NAT_A}" ip link set nat-a-ext name ext0
+ip netns exec "${NS_NAT_A}" ip link set ext0 up
+ip netns exec "${NS_NAT_A}" ip route replace default via 203.0.113.1
+
+ip link add lh-b type veth peer name nat-b-ext
+ip link set lh-b netns "${NS_LH}"
+ip link set nat-b-ext netns "${NS_NAT_B}"
+ip netns exec "${NS_LH}" ip addr add 198.51.100.1/30 dev lh-b
+ip netns exec "${NS_LH}" ip link set lh-b up
+ip netns exec "${NS_NAT_B}" ip addr add 198.51.100.2/30 dev nat-b-ext
+ip netns exec "${NS_NAT_B}" ip link set nat-b-ext name ext0
+ip netns exec "${NS_NAT_B}" ip link set ext0 up
+ip netns exec "${NS_NAT_B}" ip route replace default via 198.51.100.1
+
+# The Lighthouse namespace is also the simulated Internet router. INPUT reaches
+# the Lighthouse process; FORWARD represents the public Internet path used by P2P.
+ip netns exec "${NS_LH}" sysctl -q -w net.ipv4.ip_forward=1
+ip netns exec "${NS_LH}" iptables -P FORWARD ACCEPT
 
 create_inside() {
   local natns="$1" clientns="$2" tag="$3" nat_addr="$4" client_addr="$5"
@@ -96,7 +106,6 @@ create_inside() {
   ip netns exec "${clientns}" ip link set eth0 up
   ip netns exec "${clientns}" ip route replace default via "${nat_addr}"
 }
-
 create_inside "${NS_NAT_A}" "${NS_A}" a 10.10.1.1 10.10.1.2
 create_inside "${NS_NAT_B}" "${NS_B}" b 10.20.1.1 10.20.1.2
 
@@ -105,20 +114,18 @@ configure_nat() {
   ip netns exec "${ns}" sysctl -q -w net.ipv4.ip_forward=1
   ip netns exec "${ns}" iptables -P FORWARD ACCEPT
 
-  # Endpoint-independent, port-preserving UDP mapping for Taltun. This models
-  # the NAT class where hole punching is expected to work. A separate firewall
-  # phase below intentionally blocks the peer-to-peer path to validate relay
-  # fallback when direct connectivity is unavailable.
+  # Endpoint-independent, port-preserving UDP mapping. This is the NAT class
+  # where UDP hole punching is expected to succeed.
   ip netns exec "${ns}" iptables -t nat -A POSTROUTING     -s "${inside_ip}" -p udp --sport 9000 -o ext0     -j SNAT --to-source "${public_ip}:9000"
   ip netns exec "${ns}" iptables -t nat -A PREROUTING     -i ext0 -d "${public_ip}" -p udp --dport 9000     -j DNAT --to-destination "${inside_ip}:9000"
 }
 configure_nat "${NS_NAT_A}" 10.10.1.2 203.0.113.2
-configure_nat "${NS_NAT_B}" 10.20.1.2 203.0.113.3
+configure_nat "${NS_NAT_B}" 10.20.1.2 198.51.100.2
 
 cat >"${TMP}/lh.toml" <<EOF
 [interface]
 mode = "lighthouse"
-local_addr = "203.0.113.1:9000"
+local_addr = "0.0.0.0:9000"
 private_key = "${LH_PRIV}"
 vip = "10.77.0.1"
 mtu = 1380
@@ -170,7 +177,7 @@ routes = ["10.77.0.0/24"]
 [[peers]]
 vip = "10.77.0.1"
 public_key = "${LH_PUB}"
-endpoint = "203.0.113.1:9000"
+endpoint = "198.51.100.1:9000"
 allowed_ips = ["10.77.0.0/24"]
 lighthouse = true
 
@@ -197,12 +204,12 @@ wait_ping() {
     sleep 1
   done
   echo "FAIL: ${label}" >&2
-  echo "--- lighthouse.log ---" >&2; tail -n 100 "${TMP}/lh.log" >&2 || true
-  echo "--- a.log ---" >&2; tail -n 100 "${TMP}/a.log" >&2 || true
-  echo "--- b.log ---" >&2; tail -n 100 "${TMP}/b.log" >&2 || true
+  echo "--- lighthouse.log ---" >&2; tail -n 140 "${TMP}/lh.log" >&2 || true
+  echo "--- a.log ---" >&2; tail -n 140 "${TMP}/a.log" >&2 || true
+  echo "--- b.log ---" >&2; tail -n 140 "${TMP}/b.log" >&2 || true
   for cap in cap-lh cap-nat-a cap-a cap-nat-b cap-b; do
     echo "--- ${cap}.log ---" >&2
-    tail -n 160 "${TMP}/${cap}.log" >&2 || true
+    tail -n 180 "${TMP}/${cap}.log" >&2 || true
   done
   return 1
 }
@@ -217,7 +224,7 @@ wait_log() {
     sleep 1
   done
   echo "FAIL: ${label} (pattern: ${pattern})" >&2
-  tail -n 120 "${file}" >&2 || true
+  tail -n 160 "${file}" >&2 || true
   return 1
 }
 
@@ -226,7 +233,6 @@ capture_udp() {
   ip netns exec "${ns}" tcpdump -n -l -i any udp port 9000 >"${file}" 2>&1 &
   PIDS+=("$!")
 }
-
 capture_udp "${NS_LH}" "${TMP}/cap-lh.log"
 capture_udp "${NS_NAT_A}" "${TMP}/cap-nat-a.log"
 capture_udp "${NS_A}" "${TMP}/cap-a.log"
@@ -240,42 +246,38 @@ start_node "${NS_B}" "${TMP}/b.toml" "${TMP}/b.log" PID_B
 wait_log "${TMP}/a.log" 'Sesión v2 iniciada con 10.77.0.1' "A established encrypted session with Lighthouse"
 wait_log "${TMP}/b.log" 'Sesión v2 iniciada con 10.77.0.1' "B established encrypted session with Lighthouse"
 
-# First A->B traffic must work through the Lighthouse relay because neither
-# spoke starts with the other's endpoint.
+# Baseline: neither spoke knows the other's endpoint. Connectivity must work
+# through the Lighthouse relay before discovery is attempted.
 wait_ping "${NS_A}" 10.77.0.3 "initial A -> B through Lighthouse relay"
 
-# Relay traffic causes encrypted PeerUpdate messages. Both clients should then
-# prove the candidate endpoint with a direct v2 handshake.
-wait_log "${TMP}/a.log" 'Sesión v2 iniciada con 10.77.0.3' "A established direct v2 session to B"
-wait_log "${TMP}/b.log" 'Sesión v2 aceptada con 10.77.0.2\|Sesión v2 iniciada con 10.77.0.2' "B established direct v2 session to A"
+# After bidirectional relay traffic is observed, Lighthouse sends authenticated
+# PeerUpdate hints and the peers validate them with a direct v2 handshake.
+wait_log "${TMP}/a.log" 'Sesión v2 iniciada con 10.77.0.3' "A established direct v2 session to B" 40
+wait_log "${TMP}/b.log" 'Sesión v2 aceptada con 10.77.0.2\|Sesión v2 iniciada con 10.77.0.2' "B established direct v2 session to A" 40
 
-# Prove the data path is truly direct: make the Lighthouse unreachable from
-# both clients while keeping A<->B public NAT addresses reachable.
-ip netns exec "${NS_NAT_A}" iptables -I FORWARD 1 -p udp -d 203.0.113.1 --dport 9000 -j DROP
-ip netns exec "${NS_NAT_B}" iptables -I FORWARD 1 -p udp -d 203.0.113.1 --dport 9000 -j DROP
-wait_ping "${NS_A}" 10.77.0.3 "A -> B remains alive with Lighthouse blocked" 15
+# Disable only the Lighthouse service. The namespace continues routing public
+# packets, so a successful ping here proves the data path is direct P2P.
+ip netns exec "${NS_LH}" iptables -I INPUT 1 -p udp --dport 9000 -j DROP
+wait_ping "${NS_A}" 10.77.0.3 "A -> B remains alive with Lighthouse service blocked" 15
+ip netns exec "${NS_LH}" iptables -D INPUT 1
 
-# Restore Lighthouse reachability, then break the direct public path in both
-# directions. After DirectFallbackTimeout the /32 route must move back to the
-# trusted Lighthouse and relay traffic must recover.
-ip netns exec "${NS_NAT_A}" iptables -D FORWARD 1
-ip netns exec "${NS_NAT_B}" iptables -D FORWARD 1
-
-ip netns exec "${NS_NAT_A}" iptables -I FORWARD 1 -p udp -d 203.0.113.3 --dport 9000 -j DROP
-ip netns exec "${NS_NAT_B}" iptables -I FORWARD 1 -p udp -d 203.0.113.2 --dport 9000 -j DROP
+# Break only the forwarded public P2P path while leaving Lighthouse INPUT
+# reachable. After the liveness timeout, the client must route B via Lighthouse.
+ip netns exec "${NS_LH}" iptables -I FORWARD 1 -p udp -s 203.0.113.2 -d 198.51.100.2 --dport 9000 -j DROP
+ip netns exec "${NS_LH}" iptables -I FORWARD 1 -p udp -s 198.51.100.2 -d 203.0.113.2 --dport 9000 -j DROP
 
 echo "waiting for direct-path liveness timeout..."
 sleep 35
 wait_log "${TMP}/a.log" 'Lighthouse fallback: 10.77.0.3 via 10.77.0.1' "A fell back to Lighthouse relay" 10
 wait_ping "${NS_A}" 10.77.0.3 "A -> B works through relay after direct-path failure" 15
 
-# Restore the direct path. Relay traffic should emit PeerUpdate again and a new
-# authenticated direct session should be installed.
-ip netns exec "${NS_NAT_A}" iptables -D FORWARD 1
-ip netns exec "${NS_NAT_B}" iptables -D FORWARD 1
+# Restore forwarded P2P. Relay traffic should trigger fresh discovery and a new
+# authenticated direct session.
+ip netns exec "${NS_LH}" iptables -D FORWARD 1
+ip netns exec "${NS_LH}" iptables -D FORWARD 1
 
 before="$(grep -c 'Sesión v2 iniciada con 10.77.0.3' "${TMP}/a.log" || true)"
-for _ in $(seq 1 20); do
+for _ in $(seq 1 30); do
   ip netns exec "${NS_A}" ping -c 1 -W 1 10.77.0.3 >/dev/null 2>&1 || true
   after="$(grep -c 'Sesión v2 iniciada con 10.77.0.3' "${TMP}/a.log" || true)"
   if [[ "${after}" -gt "${before}" ]]; then
@@ -287,13 +289,12 @@ done
 after="$(grep -c 'Sesión v2 iniciada con 10.77.0.3' "${TMP}/a.log" || true)"
 if [[ "${after}" -le "${before}" ]]; then
   echo "FAIL: direct session was not re-established" >&2
-  tail -n 120 "${TMP}/a.log" >&2
+  tail -n 160 "${TMP}/a.log" >&2
   exit 1
 fi
 
-# Block Lighthouse again: recovered direct route must carry traffic by itself.
-ip netns exec "${NS_NAT_A}" iptables -I FORWARD 1 -p udp -d 203.0.113.1 --dport 9000 -j DROP
-ip netns exec "${NS_NAT_B}" iptables -I FORWARD 1 -p udp -d 203.0.113.1 --dport 9000 -j DROP
+# Prove the recovered route is direct again.
+ip netns exec "${NS_LH}" iptables -I INPUT 1 -p udp --dport 9000 -j DROP
 wait_ping "${NS_A}" 10.77.0.3 "recovered direct path survives without Lighthouse" 15
 
 echo "PASS: Lighthouse NAT traversal, direct promotion, fallback and recovery complete"

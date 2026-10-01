@@ -119,6 +119,10 @@ vip = "10.0.0.1"
 # Obligatorio si este nodo debe iniciar la conexión hacia él.
 endpoint = "203.0.113.1:9000"
 
+# Obligatoria: clave pública X25519 fijada del peer.
+# El handshake se rechaza si la identidad presentada no coincide.
+public_key = "CLAVE_PUBLICA_X25519_DEL_PEER_64_HEX"
+
 # (Nuevo v0.10) AllowedIPs: ¿Qué subredes están "detrás" de este peer?
 # Permite Site-to-Site. Si envías tráfico a estas IPs, Taltun sabrá que debe enviárselo a este Peer.
 allowed_ips = ["192.168.50.0/24"]
@@ -179,12 +183,14 @@ routes = ["10.0.0.0/24"] # El servidor necesita saber enrutar la VPN
 # Peer: OFICINA
 [[peers]]
 vip = "10.0.0.2"
+public_key = "PUBLIC_KEY_OFFICE"
 # "Detrás de la oficina está la red 192.168.50.x"
 allowed_ips = ["192.168.50.0/24"] 
 
 # Peer: EMPLEADO
 [[peers]]
 vip = "10.0.0.3"
+public_key = "PUBLIC_KEY_EMPLOYEE"
 ```
 
 ---
@@ -225,6 +231,7 @@ routes = ["10.0.0.0/24"] # Enruta tráfico VPN
 [[peers]]
 # Conexión al Hub
 vip = "10.0.0.1"
+public_key = "PUBLIC_KEY_SERVER"
 endpoint = "1.2.3.4:9000"
 # Definimos "0.0.0.0/0" si queremos que TODA la red VPN sea accesible via el Hub
 allowed_ips = ["10.0.0.0/24"]

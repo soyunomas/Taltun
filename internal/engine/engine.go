@@ -359,7 +359,7 @@ func (e *Engine) processOnePacket(pkt []byte, originalBuff *pool.Buff, rAddr *ne
 	if msgType == protocol.MsgTypeHandshakeInit || msgType == protocol.MsgTypeHandshakeResp {
 		underLoad := len(e.handshakeCh) > 250
 		
-		_, _, cookie, err := protocol.ParseHandshake(pkt)
+		_, _, _, cookie, err := protocol.ParseHandshake(pkt)
 		if err != nil {
 			pool.Put(originalBuff)
 			return
@@ -750,7 +750,7 @@ func (e *Engine) handshakeWorker() {
 }
 
 func (e *Engine) processHandshake(req HandshakeRequest) {
-	senderVIP, pubKey, _, err := protocol.ParseHandshake(req.Packet)
+	senderVIP, pubKey, authTag, _, err := protocol.ParseHandshake(req.Packet)
 	if err != nil {
 		return
 	}
@@ -776,6 +776,13 @@ func (e *Engine) processHandshake(req HandshakeRequest) {
 		return
 	}
 
+	if !crypto.VerifyHandshakeAuth(sharedSecret, req.Packet[0], senderVIP, e.localVIP, pubKey, authTag) {
+		if e.cfg.Debug {
+			log.Printf("❌ Handshake rechazado para %s: transcript auth inválida", netutil.Uint32ToIP(senderVIP))
+		}
+		return
+	}
+
 	sessionAEAD, err := crypto.DeriveSessionKey(sharedSecret, "taltun-session-v1")
 	if err != nil {
 		return
@@ -793,22 +800,35 @@ func (e *Engine) processHandshake(req HandshakeRequest) {
 
 func (e *Engine) sendHandshakeInit(p *PeerInfo) {
 	cookie := p.GetCookie()
-	e.sendHandshakePacket(e.localVIP, protocol.MsgTypeHandshakeInit, e.staticKey.Public[:], p.GetEndpoint(), cookie)
+	e.sendHandshakePacket(p, protocol.MsgTypeHandshakeInit, p.GetEndpoint(), cookie)
 }
 
 func (e *Engine) sendHandshakeResp(p *PeerInfo, addr *net.UDPAddr) {
-	e.sendHandshakePacket(e.localVIP, protocol.MsgTypeHandshakeResp, e.staticKey.Public[:], addr, nil)
+	e.sendHandshakePacket(p, protocol.MsgTypeHandshakeResp, addr, nil)
 }
 
-func (e *Engine) sendHandshakePacket(senderVIP uint32, msgType uint8, pubKey []byte, addr *net.UDPAddr, cookie []byte) {
+func (e *Engine) sendHandshakePacket(p *PeerInfo, msgType uint8, addr *net.UDPAddr, cookie []byte) {
 	if addr == nil {
 		return
 	}
+
+	sharedSecret, err := e.staticKey.SharedSecret(p.PublicKey[:])
+	if err != nil {
+		return
+	}
+	authTag, err := crypto.HandshakeAuthTag(sharedSecret, msgType, e.localVIP, p.VirtualIP, e.staticKey.Public[:])
+	if err != nil {
+		return
+	}
+
 	pkt := pool.Get()
 	defer pool.Put(pkt)
 
-	n, _ := protocol.EncodeHandshake(pkt[:], msgType, senderVIP, pubKey, cookie)
-	
+	n, err := protocol.EncodeHandshake(pkt[:], msgType, e.localVIP, e.staticKey.Public[:], authTag[:], cookie)
+	if err != nil {
+		return
+	}
+
 	if len(e.rawConns) > 0 {
 		e.rawConns[0].WriteToUDP(pkt[:n], addr)
 	}

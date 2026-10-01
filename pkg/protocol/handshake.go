@@ -6,70 +6,139 @@ import (
 )
 
 const (
-	HandshakeBaseSize = 69 // 1 Type + 4 SenderIndex + 32 PubKey + 32 AuthTag
-	AuthTagSize       = 32
-	CookieSize        = 16 // HMAC-MD5 o Blake2s truncado (suficiente para DoS protection)
+	HandshakeInitSize     = 109 // type + senderVIP + sessionID + staticPub + ephemeralPub + authTag
+	HandshakeResponseSize = 109 // same layout as init
+	HandshakeFinishSize   = 45  // type + senderVIP + sessionID + finishTag
+	AuthTagSize           = 32
+	CookieSize            = 16
 )
 
-// EncodeHandshake serializa un mensaje de inicio de conexión.
-// Soporta un campo opcional 'cookie' para protección DoS.
-func EncodeHandshake(dst []byte, msgType uint8, localIndex uint32, pubKey, authTag, cookie []byte) (int, error) {
-	requiredSize := HandshakeBaseSize + len(cookie)
-	if len(dst) < requiredSize {
-		return 0, errors.New("buffer too small")
+type Handshake struct {
+	Type         uint8
+	SenderVIP    uint32
+	SessionID    uint64
+	StaticPublic []byte
+	Ephemeral    []byte
+	AuthTag      []byte
+	Cookie       []byte
+}
+
+func EncodeHandshake(
+	dst []byte,
+	msgType uint8,
+	senderVIP uint32,
+	sessionID uint64,
+	staticPublic, ephemeralPublic, authTag, cookie []byte,
+) (int, error) {
+	if msgType != MsgTypeHandshakeInit && msgType != MsgTypeHandshakeResp {
+		return 0, errors.New("invalid handshake message type")
 	}
-	if len(pubKey) != 32 {
-		return 0, errors.New("invalid pubkey size")
+	if len(staticPublic) != 32 || len(ephemeralPublic) != 32 {
+		return 0, errors.New("invalid handshake public key size")
 	}
 	if len(authTag) != AuthTagSize {
 		return 0, errors.New("invalid auth tag size")
 	}
+	if len(cookie) != 0 && len(cookie) != CookieSize {
+		return 0, errors.New("invalid cookie size")
+	}
+
+	required := HandshakeInitSize + len(cookie)
+	if len(dst) < required {
+		return 0, errors.New("buffer too small")
+	}
 
 	dst[0] = msgType
-	binary.BigEndian.PutUint32(dst[1:5], localIndex)
-	copy(dst[5:37], pubKey)
-	copy(dst[37:69], authTag)
-
+	binary.BigEndian.PutUint32(dst[1:5], senderVIP)
+	binary.BigEndian.PutUint64(dst[5:13], sessionID)
+	copy(dst[13:45], staticPublic)
+	copy(dst[45:77], ephemeralPublic)
+	copy(dst[77:109], authTag)
 	if len(cookie) > 0 {
-		copy(dst[69:], cookie)
+		copy(dst[109:125], cookie)
 	}
-
-	return requiredSize, nil
+	return required, nil
 }
 
-// ParseHandshake decodifica el mensaje.
-// Retorna la cookie si está presente en el paquete.
-func ParseHandshake(src []byte) (senderIndex uint32, pubKey, authTag, cookie []byte, err error) {
-	if len(src) < HandshakeBaseSize {
-		return 0, nil, nil, nil, errors.New("packet too small for handshake")
-	}
-	
-	senderIndex = binary.BigEndian.Uint32(src[1:5])
-	pubKey = src[5:37] // Zero-copy view
-	authTag = src[37:69]
-
-	if len(src) >= HandshakeBaseSize+CookieSize {
-		cookie = src[69 : 69+CookieSize]
+func ParseHandshake(src []byte) (Handshake, error) {
+	var h Handshake
+	if len(src) < HandshakeInitSize {
+		return h, errors.New("packet too small for handshake")
 	}
 
-	return senderIndex, pubKey, authTag, cookie, nil
+	h.Type = src[0]
+	if h.Type != MsgTypeHandshakeInit && h.Type != MsgTypeHandshakeResp {
+		return h, errors.New("invalid handshake message type")
+	}
+	h.SenderVIP = binary.BigEndian.Uint32(src[1:5])
+	h.SessionID = binary.BigEndian.Uint64(src[5:13])
+	if h.SessionID == 0 {
+		return h, errors.New("invalid zero session id")
+	}
+	h.StaticPublic = src[13:45]
+	h.Ephemeral = src[45:77]
+	h.AuthTag = src[77:109]
+
+	if len(src) == HandshakeInitSize+CookieSize {
+		h.Cookie = src[109:125]
+	} else if len(src) != HandshakeInitSize {
+		return h, errors.New("invalid handshake packet size")
+	}
+	return h, nil
 }
 
-// EncodeCookieReply crea el paquete de respuesta de cookie.
-// Estructura: Type (1) + Cookie (16)
+func EncodeHandshakeFinish(dst []byte, senderVIP uint32, sessionID uint64, authTag []byte) (int, error) {
+	if len(authTag) != AuthTagSize {
+		return 0, errors.New("invalid finish auth tag size")
+	}
+	if sessionID == 0 {
+		return 0, errors.New("invalid zero session id")
+	}
+	if len(dst) < HandshakeFinishSize {
+		return 0, errors.New("buffer too small")
+	}
+
+	dst[0] = MsgTypeHandshakeFinish
+	binary.BigEndian.PutUint32(dst[1:5], senderVIP)
+	binary.BigEndian.PutUint64(dst[5:13], sessionID)
+	copy(dst[13:45], authTag)
+	return HandshakeFinishSize, nil
+}
+
+func ParseHandshakeFinish(src []byte) (senderVIP uint32, sessionID uint64, authTag []byte, err error) {
+	if len(src) != HandshakeFinishSize {
+		return 0, 0, nil, errors.New("invalid handshake finish size")
+	}
+	if src[0] != MsgTypeHandshakeFinish {
+		return 0, 0, nil, errors.New("invalid handshake finish type")
+	}
+	senderVIP = binary.BigEndian.Uint32(src[1:5])
+	sessionID = binary.BigEndian.Uint64(src[5:13])
+	if sessionID == 0 {
+		return 0, 0, nil, errors.New("invalid zero session id")
+	}
+	authTag = src[13:45]
+	return senderVIP, sessionID, authTag, nil
+}
+
 func EncodeCookieReply(dst []byte, cookie []byte) (int, error) {
-	if len(dst) < 1+len(cookie) {
+	if len(cookie) != CookieSize {
+		return 0, errors.New("invalid cookie size")
+	}
+	if len(dst) < 1+CookieSize {
 		return 0, errors.New("buffer too small for cookie reply")
 	}
 	dst[0] = MsgTypeCookieReply
 	copy(dst[1:], cookie)
-	return 1 + len(cookie), nil
+	return 1 + CookieSize, nil
 }
 
-// ParseCookieReply extrae la cookie de un paquete de respuesta.
 func ParseCookieReply(src []byte) ([]byte, error) {
-	if len(src) < 1+CookieSize {
-		return nil, errors.New("packet too small for cookie reply")
+	if len(src) != 1+CookieSize {
+		return nil, errors.New("invalid cookie reply size")
 	}
-	return src[1 : 1+CookieSize], nil
+	if src[0] != MsgTypeCookieReply {
+		return nil, errors.New("invalid cookie reply type")
+	}
+	return src[1:], nil
 }

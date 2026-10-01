@@ -271,7 +271,6 @@ func (e *Engine) housekeepingWorker(ctx context.Context) error {
 			currentPeers := *e.peers.Load()
 			for _, p := range currentPeers {
 				if p.NeedsRekey() {
-					p.MarkHandshakePending()
 					e.sendHandshakeInit(p)
 				}
 				if p.NeedsKeepalive() {
@@ -768,88 +767,17 @@ func (e *Engine) handshakeWorker() {
 }
 
 func (e *Engine) processHandshake(req HandshakeRequest) {
-	senderVIP, pubKey, authTag, _, err := protocol.ParseHandshake(req.Packet)
-	if err != nil {
-		return
-	}
-
-	currentPeers := *e.peers.Load()
-	peer, exists := currentPeers[senderVIP]
-
-	if !exists {
-		return
-	}
-
-	// La VIP declarada no es una identidad. El handshake solo puede continuar
-	// si la clave estática presentada coincide con la fijada en configuración.
-	if !peer.MatchesPublicKey(pubKey) {
-		if e.cfg.Debug {
-			log.Printf("❌ Handshake rechazado para %s: public key no coincide", netutil.Uint32ToIP(senderVIP))
-		}
-		return
-	}
-
-	sharedSecret, err := e.staticKey.SharedSecret(pubKey)
-	if err != nil {
-		return
-	}
-
-	if !crypto.VerifyHandshakeAuth(sharedSecret, req.Packet[0], senderVIP, e.localVIP, pubKey, authTag) {
-		if e.cfg.Debug {
-			log.Printf("❌ Handshake rechazado para %s: transcript auth inválida", netutil.Uint32ToIP(senderVIP))
-		}
-		return
-	}
-
-	sessionAEAD, err := crypto.DeriveSessionKey(sharedSecret, "taltun-session-v1")
-	if err != nil {
-		return
-	}
-
-	peer.SetSessionKey(sessionAEAD)
-	peer.SetEndpoint(req.RemoteAddr)
-	
-	log.Printf("🔐 Handshake Completado con %s (%s)", netutil.Uint32ToIP(senderVIP), req.RemoteAddr)
-
-	if req.Packet[0] == protocol.MsgTypeHandshakeInit {
-		e.sendHandshakeResp(peer, req.RemoteAddr)
-	}
+	e.processHandshakeV2(req)
 }
 
 func (e *Engine) sendHandshakeInit(p *PeerInfo) {
-	cookie := p.GetCookie()
-	e.sendHandshakePacket(p, protocol.MsgTypeHandshakeInit, p.GetEndpoint(), cookie)
+	e.sendHandshakeInitV2(p)
 }
 
 func (e *Engine) sendHandshakeResp(p *PeerInfo, addr *net.UDPAddr) {
-	e.sendHandshakePacket(p, protocol.MsgTypeHandshakeResp, addr, nil)
 }
 
 func (e *Engine) sendHandshakePacket(p *PeerInfo, msgType uint8, addr *net.UDPAddr, cookie []byte) {
-	if addr == nil {
-		return
-	}
-
-	sharedSecret, err := e.staticKey.SharedSecret(p.PublicKey[:])
-	if err != nil {
-		return
-	}
-	authTag, err := crypto.HandshakeAuthTag(sharedSecret, msgType, e.localVIP, p.VirtualIP, e.staticKey.Public[:])
-	if err != nil {
-		return
-	}
-
-	pkt := pool.Get()
-	defer pool.Put(pkt)
-
-	n, err := protocol.EncodeHandshake(pkt[:], msgType, e.localVIP, e.staticKey.Public[:], authTag[:], cookie)
-	if err != nil {
-		return
-	}
-
-	if len(e.rawConns) > 0 {
-		e.rawConns[0].WriteToUDP(pkt[:n], addr)
-	}
 }
 
 func (e *Engine) sendCookieReply(addr *net.UDPAddr, cookie []byte, sockIdx int) {

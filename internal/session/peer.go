@@ -45,9 +45,15 @@ type pendingResponder struct {
 	keys               tcrypto.SessionKeys
 }
 
+type ipv4Prefix struct {
+	network uint32
+	mask    uint32
+}
+
 type Peer struct {
 	VirtualIP uint32
 	PublicKey [tcrypto.KeySize]byte
+	allowedSources []ipv4Prefix
 
 	cryptoMu sync.RWMutex
 	current  *trafficSession
@@ -88,6 +94,47 @@ func NewPeer(vip uint32, endpoint *net.UDPAddr, publicKey [tcrypto.KeySize]byte)
 		lastSent:  time.Now(),
 		lastRx:    time.Now(),
 	}
+}
+
+func (p *Peer) SetAllowedSources(cidrs []string) error {
+	prefixes := make([]ipv4Prefix, 0, len(cidrs)+1)
+	prefixes = append(prefixes, ipv4Prefix{network: p.VirtualIP, mask: ^uint32(0)})
+
+	for _, cidr := range cidrs {
+		ip, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return err
+		}
+		ip4 := ip.To4()
+		if ip4 == nil {
+			return errors.New("only IPv4 AllowedIPs are supported")
+		}
+		ones, bits := ipNet.Mask.Size()
+		if bits != 32 || ones < 0 {
+			return errors.New("invalid IPv4 AllowedIP")
+		}
+		network := uint32(ip4[0])<<24 | uint32(ip4[1])<<16 | uint32(ip4[2])<<8 | uint32(ip4[3])
+		var mask uint32
+		if ones > 0 {
+			mask = ^uint32(0) << (32 - ones)
+		}
+		prefixes = append(prefixes, ipv4Prefix{network: network & mask, mask: mask})
+	}
+
+	p.allowedSources = prefixes
+	return nil
+}
+
+func (p *Peer) AllowsSource(ip uint32) bool {
+	if ip == 0 {
+		return false
+	}
+	for _, prefix := range p.allowedSources {
+		if ip&prefix.mask == prefix.network {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *Peer) MatchesPublicKey(publicKey []byte) bool {

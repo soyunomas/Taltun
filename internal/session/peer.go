@@ -357,6 +357,15 @@ func (p *Peer) prunePreviousLocked(now time.Time) {
 	}
 }
 
+func (p *Peer) ExpirePreviousForTest() {
+	p.cryptoMu.Lock()
+	defer p.cryptoMu.Unlock()
+	if p.previous != nil {
+		p.previous.expiresAt = time.Now().Add(-time.Second)
+	}
+	p.prunePreviousLocked(time.Now())
+}
+
 func (p *Peer) SetCookie(cookie []byte) {
 	p.cookieMu.Lock()
 	defer p.cookieMu.Unlock()

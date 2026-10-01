@@ -39,9 +39,17 @@ A peer is trusted as a Lighthouse only when its local peer entry contains:
 
 PeerUpdate messages are encrypted and authenticated inside an established v2 session and consume that session's replay counter/window. An update is only an endpoint candidate. Taltun does not install the advertised endpoint for the target peer until that target completes a fresh authenticated v2 handshake from the candidate address.
 
-## Endpoint migration
+## Lighthouse connectivity and endpoint migration
 
 Authenticated data may update the source endpoint associated with the peer that successfully decrypted the packet. Lighthouse discovery cannot directly migrate another peer's trusted endpoint.
+
+Lighthouse uses relay as the connectivity baseline. P2P discovery starts only after the Lighthouse has observed non-empty application traffic in both directions between the two peers. This prevents discovery attempts from becoming a prerequisite for basic connectivity.
+
+A PeerUpdate contains an endpoint candidate, not an endpoint authorization. The initiator installs the freshly derived session material after the authenticated response, sends finish, and waits for authenticated traffic from the responder before promoting the peer's /32 route to direct P2P. The responder sends an immediate encrypted keepalive after accepting finish, providing that confirmation.
+
+If a direct peer receives no authenticated traffic for 30 seconds and a trusted Lighthouse session remains available, the /32 route is moved back to the Lighthouse. Relay traffic can later trigger a fresh discovery/handshake cycle and promote the route back to P2P.
+
+The CI Lighthouse NAT suite validates this lifecycle behind two endpoint-independent, port-preserving UDP NATs: relay baseline, direct promotion, operation while the Lighthouse service is blocked, direct-path failure, relay fallback, and direct recovery.
 
 ## DoS cookies
 
@@ -56,6 +64,7 @@ Cookie replies are stateless anti-DoS challenges. They are not trusted state-cha
 - Forward secrecy for past traffic depends on ephemeral private material no longer being available.
 - Endpoint and route configuration remains trusted local administration.
 - Performance tuning is platform-dependent; see docs/PERFORMANCE.md.
+- P2P NAT traversal is validated for endpoint-independent, stable/port-preserving UDP mappings. Taltun does not implement a full ICE/STUN stack and does not claim direct connectivity through every symmetric NAT, restrictive CGNAT, or firewall. Relay through a reachable Lighthouse is the fallback for those cases.
 
 ## Security reports
 

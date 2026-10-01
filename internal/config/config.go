@@ -12,7 +12,11 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-const keySize = 32
+const (
+	keySize = 32
+	minMTU  = 576
+	maxMTU  = 2007 // pool 2048 - data header 25 - ChaCha20-Poly1305 tag 16
+)
 
 // Config runtime optimizada (tipos estrictos).
 type Config struct {
@@ -21,6 +25,7 @@ type Config struct {
 	TunName   string
 	SecretKey []byte
 	MTU       int
+	Workers   int
 	Debug     bool
 	LocalVIP  net.IP
 
@@ -49,6 +54,7 @@ type fileConfig struct {
 		PrivateKey *string  `toml:"private_key"`
 		VIP        *string  `toml:"vip"`
 		MTU        *int     `toml:"mtu"`
+		Workers    *int     `toml:"workers"`
 		Debug      *bool    `toml:"debug"`
 		Routes     []string `toml:"routes"`
 	} `toml:"interface"`
@@ -65,6 +71,7 @@ func Load() (*Config, error) {
 	fKey := flag.String("key", "", "Override: Hex Private Key")
 	fVIP := flag.String("vip", "", "Override: VPN IP")
 	fMTU := flag.Int("mtu", 0, "Override: MTU")
+	fWorkers := flag.Int("workers", 0, "Override: UDP worker count (0 = NumCPU)")
 	fDebug := flag.Bool("debug", false, "Override: Debug logs")
 
 	fPeer := flag.String("peer", "", "Legacy: VIP,RemoteUDPAddr,PeerPublicKeyHex")
@@ -112,6 +119,9 @@ func Load() (*Config, error) {
 		if fc.Interface.MTU != nil {
 			cfg.MTU = *fc.Interface.MTU
 		}
+		if fc.Interface.Workers != nil {
+			cfg.Workers = *fc.Interface.Workers
+		}
 		if fc.Interface.Debug != nil {
 			cfg.Debug = *fc.Interface.Debug
 		}
@@ -140,6 +150,9 @@ func Load() (*Config, error) {
 	if *fMTU != 0 {
 		cfg.MTU = *fMTU
 	}
+	if *fWorkers != 0 {
+		cfg.Workers = *fWorkers
+	}
 	if *fDebug {
 		cfg.Debug = true
 	}
@@ -163,6 +176,12 @@ func Load() (*Config, error) {
 	}
 	cfg.SecretKey = keyBytes
 
+	if cfg.MTU < minMTU || cfg.MTU > maxMTU {
+		return nil, fmt.Errorf("mtu fuera de rango: %d (permitido %d..%d)", cfg.MTU, minMTU, maxMTU)
+	}
+	if cfg.Workers < 0 || cfg.Workers > 256 {
+		return nil, fmt.Errorf("workers fuera de rango: %d (permitido 0..256)", cfg.Workers)
+	}
 	if cfg.Mode != "client" && cfg.Mode != "server" && cfg.Mode != "lighthouse" {
 		return nil, fmt.Errorf("mode invalido: %s", cfg.Mode)
 	}

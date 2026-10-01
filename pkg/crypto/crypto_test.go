@@ -6,7 +6,6 @@ import (
 )
 
 func TestKeyExchangeAndDerivation(t *testing.T) {
-	// 1. Simular Alice y Bob
 	alice, err := GenerateKeyPair()
 	if err != nil {
 		t.Fatal(err)
@@ -16,24 +15,19 @@ func TestKeyExchangeAndDerivation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 2. Intercambio ECDH (Alice calcula secreto con pública de Bob)
 	aliceShared, err := alice.SharedSecret(bob.Public[:])
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// 3. Intercambio ECDH (Bob calcula secreto con pública de Alice)
 	bobShared, err := bob.SharedSecret(alice.Public[:])
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// El secreto ECDH debe ser idéntico
 	if !bytes.Equal(aliceShared[:], bobShared[:]) {
-		t.Fatalf("ECDH Mismatch!\nAlice: %x\nBob:   %x", aliceShared, bobShared)
+		t.Fatalf("ECDH mismatch\nAlice: %x\nBob:   %x", aliceShared, bobShared)
 	}
 
-	// 4. Derivación de clave de sesión (KDF)
 	aliceAEAD, err := DeriveSessionKey(aliceShared, "test-context")
 	if err != nil {
 		t.Fatal(err)
@@ -43,18 +37,38 @@ func TestKeyExchangeAndDerivation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 5. Probar encriptación/desencriptación real
 	msg := []byte("Attack at dawn!")
-	nonce := make([]byte, aliceAEAD.NonceSize()) // Zero nonce for test
-	
+	nonce := make([]byte, aliceAEAD.NonceSize())
+
 	encrypted := aliceAEAD.Seal(nil, nonce, msg, nil)
 	decrypted, err := bobAEAD.Open(nil, nonce, encrypted, nil)
-	
 	if err != nil {
-		t.Fatalf("Decryption failed: %v", err)
+		t.Fatalf("decryption failed: %v", err)
+	}
+	if !bytes.Equal(decrypted, msg) {
+		t.Errorf("message corrupted: got %q, want %q", decrypted, msg)
+	}
+}
+
+func TestSharedSecretRejectsLowOrderPublicKey(t *testing.T) {
+	kp, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	if string(decrypted) != string(msg) {
-		t.Errorf("Message corrupted: got %s, want %s", decrypted, msg)
+	lowOrder := make([]byte, KeySize)
+	if _, err := kp.SharedSecret(lowOrder); err == nil {
+		t.Fatal("expected X25519 to reject a low-order public key")
+	}
+}
+
+func TestSharedSecretRejectsWrongKeySize(t *testing.T) {
+	kp, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := kp.SharedSecret(make([]byte, KeySize-1)); err == nil {
+		t.Fatal("expected invalid peer key size to be rejected")
 	}
 }

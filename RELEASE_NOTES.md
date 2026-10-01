@@ -13,6 +13,7 @@ This release candidate is a protocol-breaking security and reliability release. 
 - Rekey now creates fresh cryptographic traffic keys. The previous generation is retained for a 30-second transition window.
 - AllowedIPs is enforced as an inbound source ACL in addition to outbound route selection.
 - Lighthouse PeerUpdate messages are encrypted, replay-protected, accepted only from locally trusted Lighthouse peers, and cannot directly install another peer's endpoint.
+- Lighthouse now uses relay-first discovery, confirms a direct v2 path before /32 promotion, automatically falls back to relay after 30 seconds without direct RX, and can recover the P2P route when connectivity returns.
 
 ## Routing and concurrency
 
@@ -32,6 +33,7 @@ CI now runs:
 - parser fuzzing
 - full build
 - privileged Linux namespace integration
+- routed Lighthouse/NAT integration: relay baseline, P2P promotion, Lighthouse outage, direct-path failure, relay fallback, and P2P recovery
 
 The namespace suite validates client/server connectivity, client-to-client relay, subnet routing, process restart recovery, and automatic two-minute rekey.
 
@@ -61,5 +63,6 @@ See docs/MIGRATION-v0.11.md before upgrading.
 - Project-specific protocol; no external professional cryptographic audit has been completed.
 - The current fixed-buffer architecture constrains MTU to 576..2007.
 - Performance varies by CPU, kernel, NIC, topology, and workload.
+- Direct NAT traversal is validated for endpoint-independent/port-preserving UDP NAT. Symmetric NAT and restrictive CGNAT may require remaining on Lighthouse relay.
 
 This prerelease should be treated as a validation candidate, not a production-readiness declaration.

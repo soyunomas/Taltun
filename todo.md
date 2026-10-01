@@ -12,7 +12,8 @@ Bring Taltun from a functional VPN prototype to a protocol with explicit peer id
 - [x] Audit current `main`, `dev`, and `Faro` implementations.
 - [x] Identify critical protocol/security defects.
 - [ ] Add regression tests for each critical issue before/with the corresponding fix.
-- [ ] Add CI for build, unit tests, race tests, vet, and Linux integration tests.
+- [x] Add CI for build, unit tests, race tests, and vet.
+- [ ] Add privileged Linux namespace/TUN integration tests to CI.
 
 Acceptance:
 - Every critical finding has a regression test or an explicit integration test.
@@ -20,11 +21,11 @@ Acceptance:
 
 ## Phase 1 — Peer identity and handshake foundations
 
-- [ ] Add `public_key` to peer configuration.
-- [ ] Reject peers without a valid pinned X25519 public key.
-- [ ] Replace deprecated `curve25519.ScalarMult` with `curve25519.X25519`.
-- [ ] Reject low-order/invalid X25519 peer public keys.
-- [ ] Bind the handshake to the configured peer identity instead of trusting the claimed VIP.
+- [x] Add `public_key` to peer configuration.
+- [x] Reject peers without a valid pinned X25519 public key.
+- [x] Replace deprecated `curve25519.ScalarMult` with `curve25519.X25519`.
+- [x] Reject low-order/invalid X25519 peer public keys.
+- [x] Bind the handshake to the configured peer identity instead of trusting the claimed VIP.
 - [ ] Add handshake transcript material suitable for deterministic key derivation.
 
 Acceptance:
@@ -96,11 +97,11 @@ Acceptance:
 
 ## Phase 7 — Integration tests and CI
 
-- [ ] Fix `scripts/run_integration_test.sh` so it does not re-add addresses already configured by Taltun.
-- [ ] Build a two-namespace client/server integration test.
+- [x] Fix `scripts/run_integration_test.sh` so it does not re-add addresses already configured by Taltun.
+- [x] Keep the two-namespace client/server integration test compatible with pinned peer keys.
 - [ ] Add restart/rekey tests.
 - [ ] Add client-to-client relay and subnet-routing tests.
-- [ ] Add GitHub Actions workflow for supported Go/Linux versions.
+- [x] Add GitHub Actions workflow for Go build, vet, unit tests, and race tests.
 - [ ] Add fuzz targets for packet parsers.
 
 Acceptance:
@@ -123,11 +124,18 @@ Acceptance:
 
 ## Phase 9 — Documentation and release hardening
 
-- [ ] Align README Go requirement with `go.mod`.
+- [x] Align README Go requirement with `go.mod`.
 - [ ] Remove or qualify unsupported claims: PFS, kernel bypass, zero-copy, zero-allocation, AES/AVX.
 - [ ] Document trust model, identity provisioning, key rotation, AllowedIPs semantics, and limitations.
 - [ ] Add upgrade/migration notes if config format changes.
 - [ ] Cut a security-focused prerelease before declaring production readiness.
+
+## Completed in first hardening increment
+
+- [x] Added `cmd/keygen` for correct X25519 private/public provisioning.
+- [x] Added regression coverage for low-order X25519 keys, pinned identities, config key parsing, and EEXIST handling.
+- [x] Removed the unsafe string slicing in netlink EEXIST detection.
+- [x] Corrected README claims that overstated current PFS/post-quantum/kernel-bypass/zero-copy guarantees.
 
 ## Immediate implementation order
 

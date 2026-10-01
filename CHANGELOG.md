@@ -2,6 +2,49 @@
 
 Todos los cambios notables en el proyecto Taltun serán documentados en este archivo.
 
+> Las entradas antiguas reflejan el estado y las afirmaciones de cada versión en su momento. Para garantías actuales y resultados reproducibles, usa `docs/SECURITY.md` y `docs/PERFORMANCE.md`.
+
+## [v0.11.0-rc1] - Security & Reliability Hardening
+
+### Seguridad
+- Identidad X25519 fijada por peer y prueba de posesión de la clave privada.
+- Handshake v2 con X25519 efímero, transcript autenticado, `session_id` aleatorio y confirmación final.
+- HKDF-SHA256 para claves de tráfico direccionales y clave de confirmación.
+- Contadores y ventanas anti-replay por generación de sesión, con transición de 30 segundos para la generación anterior.
+- Cabeceras de datos y control autenticadas como AAD de ChaCha20-Poly1305.
+- `AllowedIPs` aplicado también como ACL de origen.
+- `PeerUpdate` de Lighthouse cifrado, autenticado, rate-limited y protegido frente a replay.
+
+### Routing y concurrencia
+- Trie IPv4 LPM exacto con copy-on-write real y publicación atómica.
+- Promoción de rutas directas sólo tras endpoint autenticado.
+- Timestamps calientes y rate-limit de Lighthouse atómicos.
+- Shutdown idempotente, workers coordinados con WaitGroup y rotación de cookies detenible.
+- Validación de MTU 576..2007 y número configurable de workers UDP.
+
+### Verificación
+- CI: vet, unit tests, race detector, fuzzing de parsers y build.
+- Integración privilegiada con namespaces: relay cliente-cliente, subnet routing, restart y rekey automático.
+- Workflow Performance con pprof, iperf3, latencia, pérdida y microbenchmarks de allocations.
+
+### Rendimiento de referencia
+En el run de GitHub Actions Performance `36919598224` (Azure 4 vCPU, MTU 1380):
+- 1 worker: ~0,889 Gbit/s TCP.
+- 4 workers: ~1,126 Gbit/s TCP.
+- Pérdida UDP a 1 Gbit/s ofrecido: ~27,7% con 1 worker y ~9,0% con 4.
+- Parser/encoder de cabecera: 0 allocs/op.
+- Session seal/open: 1 alloc/op en el microbenchmark medido.
+
+Estas cifras son específicas de ese entorno y no constituyen una garantía universal.
+
+### Compatibilidad
+- Protocolo v2 no es wire-compatible con v0.10 y anteriores.
+- `public_key` es obligatorio por peer.
+- `lighthouse = true` declara explícitamente un peer de descubrimiento confiable.
+- IPv4 únicamente en esta release candidate.
+
+---
+
 ## [v0.10.0] - Internal Switching & Relay (Fase 10)
 ### 🔀 Advanced Routing (Routing V2)
 - **Radix Trie (LPM):** Reemplazo del mapa plano `map[uint32]*Peer` por una estructura de datos de árbol (`Radix Tree`) optimizada para IPv4. Permite búsquedas de prefijos CIDR (Longest Prefix Match), habilitando arquitecturas **Site-to-Site** donde un peer da acceso a toda una subred (ej. `192.168.1.0/24`).
@@ -28,7 +71,7 @@ Todos los cambios notables en el proyecto Taltun serán documentados en este arc
 ### 🚀 Core Engine
 - **WireGuard TUN:** Reemplazo de `songgao/water` por la implementación estándar industrial `wireguard-go/tun`. Habilita soporte nativo para **GSO (Generic Segmentation Offload)** y **GRO**, permitiendo al Kernel entregar "super-paquetes" de hasta 64KB reduciendo la sobrecarga de interrupciones.
 - **TUN Vectorized I/O:** Implementación de lectura por lotes desde la interfaz virtual (`tun.ReadBatch`). El motor ahora lee múltiples paquetes IP del Kernel en una sola llamada al sistema, alineándose con la optimización de UDP `recvmmsg` ya existente.
-- **Zero-Copy Header Prepend:** Uso de *Offset Reads* para reservar espacio de cabecera (`Headroom`) en el buffer antes de leer del Kernel. Permite encapsular el paquete IP sin mover la memoria (`memcpy` eliminado en el path crítico de TX).
+- **Headroom para cabecera:** uso de offset reads para reservar espacio antes del payload. La implementación actual todavía copia payload hacia buffers de salida en TX/relay; no se considera zero-copy end-to-end.
 
 ### ⚡ Concurrency & Latency (Engineering Refinements)
 - **Lock-Free Dataplane:** Eliminación de `sync.RWMutex` en el path crítico de lectura (RX/TX) mediante el patrón **Copy-On-Write** con `atomic.Pointer`. Elimina la contención de bloqueos en cargas de trabajo multicore.
@@ -47,7 +90,7 @@ Todos los cambios notables en el proyecto Taltun serán documentados en este arc
 - **Graceful Shutdown:** Manejo robusto de señales (`SIGINT`, `SIGTERM`) para garantizar el cierre limpio de sockets y descriptores de archivo, evitando corrupción de datos o estados inconsistentes en la interfaz TUN.
 
 ### ⚡ Rendimiento
-- **Cold Path Isolation:** Toda la lógica de parsing y configuración se ejecuta estrictamente antes de iniciar el motor. El *hot-path* (ciclo de transmisión) permanece intocado, manteniendo el rendimiento de **~940 Mbps**.
+- **Cold Path Isolation:** la mayor parte del parsing/configuración ocurre antes del motor. La cifra histórica de ~940 Mbps no se usa como garantía actual; ver `docs/PERFORMANCE.md`.
 
 ---
 
@@ -68,7 +111,7 @@ Todos los cambios notables en el proyecto Taltun serán documentados en este arc
 - **Gestión de Memoria:** Adaptación de `pkg/pool` para soportar asignación de slices de punteros requerida por las lecturas vectorizadas.
 
 ### 📊 Métricas
-- Validación de **Zero-Allocation** en el dataplane de recepción.
+- La versión de entonces documentó una meta de zero-allocation en RX. La medición actual sólo confirma 0 allocs/op en parser/encoder; session seal/open mide 1 alloc/op.
 - Perfilado de CPU confirma que el tiempo de ejecución principal se ha desplazado de la gestión de memoria/runtime a las operaciones criptográficas y syscalls.
 
 ---
@@ -76,7 +119,7 @@ Todos los cambios notables en el proyecto Taltun serán documentados en este arc
 ## [v0.5.0] - Multi-Core Scaling (Fase 5)
 ### ⚡ Concurrencia
 - **SO_REUSEPORT:** Implementación de socket sharding en Linux. Permite múltiples descriptores de archivo en el mismo puerto UDP distribuidos por el Kernel.
-- **CPU Affinity:** Distribución automática de goroutines de procesamiento (`Engine.run`) basada en `runtime.NumCPU()`.
+- **Worker sharding:** el número de sockets/workers UDP se deriva de `runtime.NumCPU()` por defecto; no se fija afinidad de CPU explícita.
 - **Locking:** Eliminación de contención en el hot-path al aislar el estado de los sockets por hilo.
 
 ### 🛠 Infraestructura

@@ -20,6 +20,7 @@ Todos los cambios notables en el proyecto Taltun serán documentados en este arc
 - Promoción de rutas directas sólo tras endpoint autenticado.
 - Timestamps calientes y rate-limit de Lighthouse atómicos.
 - Shutdown idempotente, workers coordinados con WaitGroup y rotación de cookies detenible.
+- Retransmisión temporizada de handshakes iniciales/rekey para tolerar pérdida de datagramas UDP.
 - Validación de MTU 576..2007 y número configurable de workers UDP.
 
 ### Verificación

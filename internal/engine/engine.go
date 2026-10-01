@@ -658,16 +658,6 @@ func writeToTun(e *Engine, plaintext []byte, buff *pool.Buff) {
 
 func (e *Engine) sendRelay(plaintext []byte, buff *pool.Buff, peer *PeerInfo, sourcePeer *PeerInfo) {
 	endpoint := peer.GetEndpoint()
-
-	if e.cfg.Mode == "lighthouse" && sourcePeer != nil && sourcePeer != peer {
-		if sourceEndpoint := sourcePeer.GetEndpoint(); sourceEndpoint != nil && peer.ShouldNotify() {
-			e.sendPeerUpdate(peer, sourcePeer.VirtualIP, sourceEndpoint)
-		}
-		if endpoint != nil && sourcePeer.ShouldNotify() {
-			e.sendPeerUpdate(sourcePeer, peer.VirtualIP, endpoint)
-		}
-	}
-
 	sessionID, aead, counter, ok := peer.NextOutbound()
 
 	if endpoint == nil || !ok {
@@ -677,9 +667,8 @@ func (e *Engine) sendRelay(plaintext []byte, buff *pool.Buff, peer *PeerInfo, so
 
 	outBufPtr := pool.Get()
 	outBuf := outBufPtr[:]
-	
 	offset := protocol.HeaderSize
-	
+
 	copy(outBuf[offset:], plaintext)
 	pool.Put(buff)
 
@@ -700,7 +689,7 @@ func (e *Engine) sendRelay(plaintext []byte, buff *pool.Buff, peer *PeerInfo, so
 	totalLen := offset + len(encrypted)
 
 	atomic.AddUint64(&peer.BytesTx, uint64(len(encrypted)))
-	
+
 	req := txRequest{
 		Data: outBuf[:totalLen],
 		Buff: outBufPtr,
@@ -710,9 +699,19 @@ func (e *Engine) sendRelay(plaintext []byte, buff *pool.Buff, peer *PeerInfo, so
 	newBatch := txBatchPool.Get().(*TxBatch)
 	newBatch.Reqs[0] = req
 	newBatch.Len = 1
-	
+
 	select {
 	case e.txCh <- newBatch:
+		// Relay delivery has priority. Discovery is only an optimization and is
+		// emitted after the forwarding packet has been queued successfully.
+		if e.cfg.Mode == "lighthouse" && sourcePeer != nil && sourcePeer != peer {
+			if sourceEndpoint := sourcePeer.GetEndpoint(); sourceEndpoint != nil && peer.ShouldNotify() {
+				e.sendPeerUpdate(peer, sourcePeer.VirtualIP, sourceEndpoint)
+			}
+			if sourcePeer.ShouldNotify() {
+				e.sendPeerUpdate(sourcePeer, peer.VirtualIP, endpoint)
+			}
+		}
 	default:
 		pool.Put(outBufPtr)
 		txBatchPool.Put(newBatch)

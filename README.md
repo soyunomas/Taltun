@@ -63,17 +63,15 @@ Taltun utiliza criptografía de clave pública. Cada nodo necesita un par de cla
 1.  **Clave Privada:** Se guarda en el archivo de configuración. **NUNCA la compartas.**
 2.  **Clave Pública:** Se deriva de la privada. Esta es la que configuras en los otros nodos (Peers) para que te reconozcan.
 
-Como Taltun usa el formato estándar de 32 bytes en Hexadecimal (Curve25519), puedes generar las claves usando `openssl`:
+Genera el par con la utilidad incluida. La privada se queda en el nodo; la pública se copia al bloque `[[peers]]` del nodo remoto:
 
 ```bash
-# Generar Clave Privada (Private Key)
-openssl rand -hex 32
-# Salida ejemplo: a1b2c3d4... (Guarda esto para tu config.toml)
-
-# Nota: Taltun derivará automáticamente la pública al arrancar. 
-# Si necesitas ver tu clave pública para dársela a otro, arranca Taltun y mira los logs,
-# o usa herramientas compatibles con X25519.
+go run ./cmd/keygen
+# private_key = "..."
+# public_key  = "..."
 ```
+
+También se instala como `bin/taltun-keygen` al ejecutar `make build`. No derives la pública con una operación Ed25519 ni intercambies las claves privadas: Taltun usa X25519.
 
 ---
 

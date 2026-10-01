@@ -2,6 +2,8 @@ package session
 
 import (
 	"encoding/binary"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	tcrypto "github.com/Soyunomas/taltun/pkg/crypto"
@@ -174,4 +176,71 @@ func makeNonce(counter uint64) []byte {
 	nonce := make([]byte, protocol.NonceSize)
 	binary.BigEndian.PutUint64(nonce[4:], counter)
 	return nonce
+}
+
+
+func TestAllowedSourcesIncludeVIPAndConfiguredPrefixes(t *testing.T) {
+	var public [tcrypto.KeySize]byte
+	p := NewPeer(0x0a000002, nil, public)
+	if err := p.SetAllowedSources([]string{"192.168.50.0/24", "10.8.4.0/22"}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, ip := range []uint32{0x0a000002, 0xc0a83201, 0x0a0807ff} {
+		if !p.AllowsSource(ip) {
+			t.Fatalf("expected source %08x to be allowed", ip)
+		}
+	}
+	for _, ip := range []uint32{0x0a000003, 0xc0a83301, 0x0a080800} {
+		if p.AllowsSource(ip) {
+			t.Fatalf("expected source %08x to be rejected", ip)
+		}
+	}
+}
+
+func TestAllowedSourcesRejectIPv6(t *testing.T) {
+	var public [tcrypto.KeySize]byte
+	p := NewPeer(1, nil, public)
+	if err := p.SetAllowedSources([]string{"2001:db8::/32"}); err == nil {
+		t.Fatal("expected IPv6 AllowedIP to fail")
+	}
+}
+
+func TestActivityTimestampsAreSafeForConcurrentAccess(t *testing.T) {
+	var public [tcrypto.KeySize]byte
+	p := NewPeer(1, nil, public)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 2000; j++ {
+				p.UpdateTimestamps(id%2 == 0)
+				_ = p.NeedsKeepalive()
+			}
+		}(i)
+	}
+	wg.Wait()
+}
+
+func TestShouldNotifyRateLimitsAtomically(t *testing.T) {
+	var public [tcrypto.KeySize]byte
+	p := NewPeer(1, nil, public)
+
+	var wins atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if p.ShouldNotify() {
+				wins.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := wins.Load(); got != 1 {
+		t.Fatalf("notify winners = %d, want 1", got)
+	}
 }

@@ -50,6 +50,9 @@ func (e *Engine) processHandshakeInitV2(
 	staticShared [crypto.KeySize]byte,
 	addr *net.UDPAddr,
 ) {
+	if peer.SessionIDInUse(h.SessionID) {
+		return
+	}
 	if !crypto.VerifyHandshakeInitAuth(
 		staticShared,
 		h.SessionID,
@@ -232,10 +235,18 @@ func (e *Engine) sendHandshakeInitV2(p *PeerInfo) {
 		return
 	}
 
-	sessionID, err := crypto.GenerateSessionID()
-	if err != nil {
-		return
+	var sessionID uint64
+	for {
+		candidate, err := crypto.GenerateSessionID()
+		if err != nil {
+			return
+		}
+		if !p.SessionIDInUse(candidate) {
+			sessionID = candidate
+			break
+		}
 	}
+
 	ephemeral, err := crypto.GenerateKeyPair()
 	if err != nil {
 		return

@@ -69,8 +69,16 @@ func TestPeerUpdateRequiresTrustedLighthouseAndDoesNotDirectlyMoveTarget(t *test
 
 	source.SetLighthouse(true)
 	e.processPeerUpdatePacket(packet, source.GetEndpoint())
-	if got := target.PendingInitiatorSessionID(); got == 0 {
+	pendingID := target.PendingInitiatorSessionID()
+	if pendingID == 0 {
 		t.Fatal("trusted lighthouse did not trigger authenticated candidate handshake")
+	}
+
+	// Replaying the same authenticated control packet must not trigger a new probe.
+	target.AbortHandshake(pendingID)
+	e.processPeerUpdatePacket(packet, source.GetEndpoint())
+	if got := target.PendingInitiatorSessionID(); got != 0 {
+		t.Fatalf("replayed peer update triggered handshake %d", got)
 	}
 
 	// Discovery never directly installs the suggested endpoint.

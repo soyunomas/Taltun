@@ -45,8 +45,8 @@
 - [x] Test de replay/reordenamiento.
 - [x] Test de pérdida del primer `Finish` y recuperación.
 - [x] Test de rekey iniciado por el peer.
-- [ ] Compilar tests Android en GitHub Actions.
-- [ ] Generar APK instalable y publicarlo como artifact.
+- [x] Compilar tests Android en GitHub Actions.
+- [x] Generar APK instalable y publicarlo como artifact.
 
 ## Fuera del alcance de v0.1
 

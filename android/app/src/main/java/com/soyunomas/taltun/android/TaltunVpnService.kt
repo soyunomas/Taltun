@@ -34,6 +34,7 @@ class TaltunVpnService : VpnService() {
     companion object {
         const val ACTION_CONNECT = "com.soyunomas.taltun.android.CONNECT"
         const val ACTION_DISCONNECT = "com.soyunomas.taltun.android.DISCONNECT"
+        const val EXTRA_PROFILE_ID = "com.soyunomas.taltun.android.PROFILE_ID"
         private const val NOTIFICATION_ID = 1001
         private const val CHANNEL_ID = "taltun_vpn"
     }
@@ -51,16 +52,25 @@ class TaltunVpnService : VpnService() {
         when (intent?.action) {
             ACTION_DISCONNECT -> {
                 stopTunnel("Desconectado")
+                VpnRuntimeState.activeProfileId = null
+                VpnRuntimeState.activeProfileName = null
                 stopSelf()
             }
             ACTION_CONNECT, null -> {
+                val requestedProfileId = intent?.getStringExtra(EXTRA_PROFILE_ID)
+                    ?: ConfigStore(this).selectedProfileId()
+
+                if (running.get() && requestedProfileId != VpnRuntimeState.activeProfileId) {
+                    stopTunnel(null)
+                }
+
                 // A service started with startForegroundService() must promote itself
                 // immediately, before DNS, TUN creation or any other potentially slow I/O.
                 startAsForeground("Taltun", "Preparando túnel…")
                 if (running.compareAndSet(false, true)) {
                     VpnRuntimeState.resetCounters()
                     setState(VpnRuntimeState.Status.CONNECTING, "Preparando túnel")
-                    Thread({ startTunnel() }, "taltun-start").start()
+                    Thread({ startTunnel(requestedProfileId) }, "taltun-start").start()
                 }
             }
         }
@@ -70,9 +80,18 @@ class TaltunVpnService : VpnService() {
     override fun onRevoke() { stopTunnel("Permiso VPN revocado"); stopSelf(); super.onRevoke() }
     override fun onDestroy() { stopTunnel("Desconectado"); super.onDestroy() }
 
-    private fun startTunnel() {
+    private fun startTunnel(profileId: String?) {
         try {
-            val loaded = ConfigStore(this).load()
+            val store = ConfigStore(this)
+            val loaded = if (profileId != null) {
+                store.loadProfile(profileId) ?: error("El perfil seleccionado ya no existe")
+            } else {
+                store.load()
+            }
+            val resolvedProfileId = profileId ?: store.selectedProfileId()
+            resolvedProfileId?.let { store.select(it) }
+            VpnRuntimeState.activeProfileId = resolvedProfileId
+            VpnRuntimeState.activeProfileName = loaded.profileName
             val errors = loaded.validate()
             require(errors.isEmpty()) { errors.joinToString(". ") }
             config = loaded

@@ -233,7 +233,16 @@ class MainActivity : Activity() {
 
     private fun refreshState() {
         status.text = VpnRuntimeState.status.name + " · " + VpnRuntimeState.detail
-        stats.text = "TX " + bytes(VpnRuntimeState.txBytes.get()) + " · RX " + bytes(VpnRuntimeState.rxBytes.get())
+        stats.text =
+            "Datos TX " + bytes(VpnRuntimeState.txBytes.get()) +
+            " · RX " + bytes(VpnRuntimeState.rxBytes.get()) +
+            "\nUDP TX " + VpnRuntimeState.udpTxPackets.get() +
+            " · RX " + VpnRuntimeState.udpRxPackets.get() +
+            " · HS TX " + VpnRuntimeState.handshakeTx.get() +
+            " · RX " + VpnRuntimeState.handshakeRx.get() +
+            "\nRed " + VpnRuntimeState.underlyingNetwork +
+            " · local " + VpnRuntimeState.udpLocal +
+            " · remoto " + VpnRuntimeState.udpRemote
         connect.text = if (VpnRuntimeState.status == VpnRuntimeState.Status.CONNECTED ||
             VpnRuntimeState.status == VpnRuntimeState.Status.CONNECTING) "Desconectar" else "Conectar"
     }

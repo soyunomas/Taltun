@@ -1,13 +1,11 @@
 package com.soyunomas.taltun.android.core
 
-import java.math.BigInteger
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.KeyFactory
 import java.security.SecureRandom
-import java.security.spec.NamedParameterSpec
-import java.security.spec.XECPrivateKeySpec
-import java.security.spec.XECPublicKeySpec
+import java.security.spec.PKCS8EncodedKeySpec
+import java.security.spec.X509EncodedKeySpec
 import javax.crypto.Cipher
 import javax.crypto.KeyAgreement
 import javax.crypto.Mac
@@ -16,9 +14,19 @@ import javax.crypto.spec.SecretKeySpec
 
 object TaltunCrypto {
     const val KEY_SIZE = 32
-    private const val HASH_SIZE = 32
     private val random = SecureRandom()
-    private val x25519Params = NamedParameterSpec.X25519
+
+    // RFC 8410 DER prefixes for raw X25519 key material. Android's Conscrypt
+    // accepts PKCS#8/X.509 EncodedKeySpec consistently across API 33+,
+    // including releases where XECPrivateKeySpec/XECPublicKeySpec interop is provider-specific.
+    private val x25519Pkcs8Prefix = byteArrayOf(
+        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
+        0x03, 0x2b, 0x65, 0x6e, 0x04, 0x22, 0x04, 0x20,
+    )
+    private val x25519X509Prefix = byteArrayOf(
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65,
+        0x6e, 0x03, 0x21, 0x00,
+    )
 
     data class RawKeyPair(val privateKey: ByteArray, val publicKey: ByteArray)
     data class SessionKeys(val initiatorToResponder: ByteArray, val responderToInitiator: ByteArray, val finish: ByteArray)
@@ -36,10 +44,14 @@ object TaltunCrypto {
 
     fun sharedSecret(privateKey: ByteArray, peerPublic: ByteArray): ByteArray {
         require(privateKey.size == KEY_SIZE && peerPublic.size == KEY_SIZE)
-        val factory = KeyFactory.getInstance("XDH")
-        val privateObject = factory.generatePrivate(XECPrivateKeySpec(x25519Params, privateKey.copyOf()))
-        val publicObject = factory.generatePublic(XECPublicKeySpec(x25519Params, littleEndianToPositiveBigInteger(peerPublic)))
-        val agreement = KeyAgreement.getInstance("XDH")
+        val factory = x25519KeyFactory()
+        val privateObject = factory.generatePrivate(
+            PKCS8EncodedKeySpec(x25519Pkcs8Prefix + privateKey)
+        )
+        val publicObject = factory.generatePublic(
+            X509EncodedKeySpec(x25519X509Prefix + peerPublic)
+        )
+        val agreement = x25519KeyAgreement()
         agreement.init(privateObject); agreement.doPhase(publicObject, true)
         val shared = agreement.generateSecret()
         if (shared.all { it == 0.toByte() }) throw IllegalArgumentException("invalid low-order X25519 public key")
@@ -108,7 +120,14 @@ object TaltunCrypto {
 
     private fun hmacSha256(key: ByteArray, data: ByteArray): ByteArray { val mac = Mac.getInstance("HmacSHA256"); mac.init(SecretKeySpec(key, "HmacSHA256")); return mac.doFinal(data) }
     private fun sessionIdentity(sessionId: Long, initiatorVip: Int, responderVip: Int): ByteArray = ByteBuffer.allocate(16).order(ByteOrder.BIG_ENDIAN).putLong(sessionId).putInt(initiatorVip).putInt(responderVip).array()
-    private fun littleEndianToPositiveBigInteger(raw: ByteArray): BigInteger = BigInteger(1, raw.reversedArray())
+    private fun x25519KeyFactory(): KeyFactory =
+        runCatching { KeyFactory.getInstance("XDH") }
+            .getOrElse { KeyFactory.getInstance("X25519") }
+
+    private fun x25519KeyAgreement(): KeyAgreement =
+        runCatching { KeyAgreement.getInstance("XDH") }
+            .getOrElse { KeyAgreement.getInstance("X25519") }
+
     private fun requireKey(value: ByteArray): ByteArray { require(value.size == KEY_SIZE); return value }
     private fun ascii(value: String) = value.toByteArray(Charsets.US_ASCII)
     private fun concat(vararg arrays: ByteArray): ByteArray { val out = ByteArray(arrays.sumOf { it.size }); var offset = 0; arrays.forEach { it.copyInto(out, offset); offset += it.size }; return out }

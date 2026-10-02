@@ -13,6 +13,7 @@ object VpnRuntimeState {
     val udpRxPackets = AtomicLong(0)
     val handshakeTx = AtomicLong(0)
     val handshakeRx = AtomicLong(0)
+    val tunDroppedPackets = AtomicLong(0)
     @Volatile var udpLocal: String = "—"
     @Volatile var udpRemote: String = "—"
     @Volatile var underlyingNetwork: String = "—"
@@ -24,6 +25,7 @@ object VpnRuntimeState {
         udpRxPackets.set(0)
         handshakeTx.set(0)
         handshakeRx.set(0)
+        tunDroppedPackets.set(0)
         udpLocal = "—"
         udpRemote = "—"
         underlyingNetwork = "—"

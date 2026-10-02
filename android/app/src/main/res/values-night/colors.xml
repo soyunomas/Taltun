@@ -1,0 +1,10 @@
+<resources>
+    <color name="taltun_blue">#8AB4FF</color>
+    <color name="taltun_blue_dark">#B7CDFF</color>
+    <color name="taltun_background">#111318</color>
+    <color name="taltun_surface">#1B1E24</color>
+    <color name="taltun_surface_muted">#292D35</color>
+    <color name="taltun_text_primary">#F2F4F7</color>
+    <color name="taltun_text_secondary">#B6BDC8</color>
+    <color name="taltun_border">#3B414C</color>
+</resources>

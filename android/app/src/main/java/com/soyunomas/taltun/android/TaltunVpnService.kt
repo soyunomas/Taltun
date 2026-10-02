@@ -101,7 +101,8 @@ class TaltunVpnService : VpnService() {
         val buffer = ByteArray(maxOf(4096, cfg.mtu + 128))
         try {
             while (running.get()) {
-                val count = input.read(buffer): if (count <= 0) continue
+                val count = input.read(buffer)
+                if (count <= 0) continue
                 val plaintext = buffer.copyOf(count)
                 val encrypted = session?.seal(plaintext, System.currentTimeMillis()) ?: continue
                 sendUdp(udp, encrypted); VpnRuntimeState.txBytes.addAndGet(count.toLong())

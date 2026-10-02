@@ -11,6 +11,10 @@ class TaltunSession(
     companion object {
         const val HANDSHAKE_RETRY_MS = 2_000L
         const val KEEPALIVE_MS = 10_000L
+        // The Go peer sends keepalives every ~10 s. If we receive nothing
+        // authenticated for two keepalive intervals, assume the peer lost
+        // its session state (for example after a server restart) and rekey.
+        const val SESSION_STALE_MS = 20_000L
         const val PREVIOUS_GRACE_MS = 30_000L
         const val FINISH_MAX_RETRIES = 5
     }
@@ -71,6 +75,7 @@ class TaltunSession(
     @Synchronized
     fun needsInitiatorHandshake(now: Long): Boolean {
         prune(now)
+        expireUnresponsiveSession(now)
         if (current != null || pendingResponder != null || awaitingFinishAck != null) return false
         val pending = pendingInitiator ?: return true
         return now - pending.createdAt >= HANDSHAKE_RETRY_MS
@@ -141,6 +146,7 @@ class TaltunSession(
             handshake.authTag,
         )
         if (!valid) return null
+        lastRxAt = now
 
         val responderEphemeral = TaltunCrypto.generateKeyPair()
         val ephemeralShared = runCatching {
@@ -204,6 +210,7 @@ class TaltunSession(
             handshake.ephemeralPublic,
         )
         if (!TaltunCrypto.constantTimeEquals(expectedTag, handshake.authTag)) return null
+        lastRxAt = now
 
         val ephemeralShared = runCatching {
             TaltunCrypto.sharedSecret(pending.ephemeral.privateKey, handshake.ephemeralPublic)
@@ -345,6 +352,21 @@ class TaltunSession(
 
     private fun isExpectedPeer(handshake: TaltunProtocol.Handshake): Boolean =
         handshake.senderVip == peerVip && handshake.staticPublic.contentEquals(peerStaticPublic)
+
+    private fun expireUnresponsiveSession(now: Long) {
+        val active = current ?: return
+        if (lastRxAt <= 0L || now - lastRxAt < SESSION_STALE_MS) return
+
+        // Preserve the stale generation briefly so delayed packets can still
+        // be authenticated while a fresh handshake is negotiated.
+        active.expiresAt = now + PREVIOUS_GRACE_MS
+        previous = active
+        current = null
+        pendingInitiator = null
+        pendingResponder = null
+        awaitingFinishAck = null
+        lastRxAt = 0L
+    }
 
     private fun prune(now: Long) {
         if (previous != null && now >= previous!!.expiresAt) previous = null

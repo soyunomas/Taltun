@@ -103,7 +103,7 @@ class TaltunVpnService : VpnService() {
             socket = udp
 
             VpnRuntimeState.udpLocal = udp.localSocketAddress?.toString() ?: "desconocido"
-            VpnRuntimeState.udpRemote = "\${resolvedEndpoint.address.hostAddress}:\${resolvedEndpoint.port}"
+            VpnRuntimeState.udpRemote = resolvedEndpoint.address.hostAddress + ":" + resolvedEndpoint.port
 
             updateForegroundNotification(loaded.profileName, "Negociando sesión v2")
             setState(VpnRuntimeState.Status.CONNECTING, "Preparando primer handshake")
@@ -173,9 +173,29 @@ class TaltunVpnService : VpnService() {
             while (running.get()) {
                 val count = input.read(buffer)
                 if (count <= 0) continue
+
+                // Taltun v2 is IPv4-only. Android can still surface non-IPv4
+                // traffic through the TUN; do not send it to the Go peer.
+                if (count < 20 || ((buffer[0].toInt() ushr 4) and 0x0f) != 4) {
+                    VpnRuntimeState.tunDroppedPackets.incrementAndGet()
+                    continue
+                }
+                val ihl = (buffer[0].toInt() and 0x0f) * 4
+                if (ihl < 20 || count < ihl) {
+                    VpnRuntimeState.tunDroppedPackets.incrementAndGet()
+                    continue
+                }
+
                 val plaintext = buffer.copyOf(count)
+                val source = Ipv4.fromPacket(plaintext, source = true)
+                if (source == null || source != cfg.localVipInt()) {
+                    VpnRuntimeState.tunDroppedPackets.incrementAndGet()
+                    continue
+                }
+
                 val encrypted = session?.seal(plaintext, System.currentTimeMillis()) ?: continue
-                sendUdp(udp, encrypted); VpnRuntimeState.txBytes.addAndGet(count.toLong())
+                sendUdp(udp, encrypted)
+                VpnRuntimeState.txBytes.addAndGet(count.toLong())
             }
         } catch (error: Throwable) { if (running.get()) fail("Lectura TUN: ${error.message}") }
     }
@@ -258,14 +278,20 @@ class TaltunVpnService : VpnService() {
         sendUdp(udp, data, destination)
         val attempt = VpnRuntimeState.handshakeTx.incrementAndGet()
         val target = destination ?: remoteEndpoint.get()
-        val targetText = target?.let { "\${it.address?.hostAddress ?: it.hostString}:\${it.port}" } ?: "?"
+        val targetText = target?.let {
+            (it.address?.hostAddress ?: it.hostString) + ":" + it.port
+        } ?: "?"
         setState(
             VpnRuntimeState.Status.CONNECTING,
-            "Handshake TX #$attempt · \${VpnRuntimeState.underlyingNetwork} · \${VpnRuntimeState.udpLocal} → $targetText · RX UDP \${VpnRuntimeState.udpRxPackets.get()}",
+            "Handshake TX #" + attempt +
+                " · " + VpnRuntimeState.underlyingNetwork +
+                " · " + VpnRuntimeState.udpLocal +
+                " → " + targetText +
+                " · RX UDP " + VpnRuntimeState.udpRxPackets.get(),
         )
     }
 
-    private fun sameEndpoint(a: InetSocketAddress?, b: InetSocketAddress?): Boolean =
+    private fun sameEndpoint    private fun sameEndpoint(a: InetSocketAddress?, b: InetSocketAddress?): Boolean =
         a != null && b != null && a.port == b.port && a.address == b.address
 
     private fun updateConnectedState(localSession: TaltunSession) {

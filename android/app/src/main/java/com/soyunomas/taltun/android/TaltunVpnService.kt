@@ -7,6 +7,9 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -74,30 +77,92 @@ class TaltunVpnService : VpnService() {
             require(errors.isEmpty()) { errors.joinToString(". ") }
             config = loaded
             val endpoint = loaded.endpointParts()
-            remoteEndpoint.set(InetSocketAddress(Ipv4.resolveV4(endpoint.host), endpoint.port))
+            val resolvedEndpoint = InetSocketAddress(Ipv4.resolveV4(endpoint.host), endpoint.port)
+            remoteEndpoint.set(resolvedEndpoint)
+
+            val underlyingNetwork = findUnderlyingNetwork()
+                ?: error("No se encontró una red física disponible para transportar Taltun")
+            VpnRuntimeState.underlyingNetwork = describeNetwork(underlyingNetwork)
+
             val localSession = TaltunSession(loaded.localVipInt(), loaded.privateKey(), loaded.peerVipInt(), loaded.peerPublicKey())
             session = localSession
-            val descriptor = establishVpn(loaded)
+
+            val descriptor = establishVpn(loaded, underlyingNetwork)
             vpnInterface = descriptor
-            val udp = DatagramSocket(null).apply { reuseAddress = false; bind(InetSocketAddress(0)); soTimeout = 1_000 }
+
+            val udp = DatagramSocket(null).apply {
+                reuseAddress = false
+                bind(InetSocketAddress(0))
+                soTimeout = 1_000
+            }
             check(protect(udp)) { "Android no pudo proteger el socket UDP del túnel" }
+            underlyingNetwork.bindSocket(udp)
+            check(setUnderlyingNetworks(arrayOf(underlyingNetwork))) {
+                "Android no pudo registrar la red física subyacente"
+            }
             socket = udp
+
+            VpnRuntimeState.udpLocal = udp.localSocketAddress?.toString() ?: "desconocido"
+            VpnRuntimeState.udpRemote = "\${resolvedEndpoint.address.hostAddress}:\${resolvedEndpoint.port}"
+
             updateForegroundNotification(loaded.profileName, "Negociando sesión v2")
-            setState(VpnRuntimeState.Status.CONNECTING, "Negociando sesión v2")
+            setState(VpnRuntimeState.Status.CONNECTING, "Preparando primer handshake")
+
+            sendHandshakePacket(udp, localSession.createHandshakeInit(System.currentTimeMillis()))
+
             workers.execute { udpReceiveLoop(udp, descriptor) }
             workers.execute { tunReadLoop(udp, descriptor) }
-            scheduler.scheduleAtFixedRate({ maintenanceTick(udp) }, 0, 250, TimeUnit.MILLISECONDS)
+            scheduler.scheduleAtFixedRate({ maintenanceTick(udp) }, 250, 250, TimeUnit.MILLISECONDS)
         } catch (error: Throwable) {
             setState(VpnRuntimeState.Status.ERROR, error.message ?: error.javaClass.simpleName)
             stopTunnel(null); stopSelf()
         }
     }
 
-    private fun establishVpn(cfg: TaltunConfig): ParcelFileDescriptor {
-        val builder = Builder().setSession(cfg.profileName).setMtu(cfg.mtu).addAddress(cfg.localVip, 32).setBlocking(true)
-        cfg.routes.forEach { route -> val prefix = Ipv4.parsePrefix(route); builder.addRoute(Ipv4.format(prefix.network), prefix.prefixLength) }
+    private fun establishVpn(cfg: TaltunConfig, underlyingNetwork: Network): ParcelFileDescriptor {
+        val builder = Builder()
+            .setSession(cfg.profileName)
+            .setMtu(cfg.mtu)
+            .addAddress(cfg.localVip, 32)
+            .setBlocking(true)
+            .setUnderlyingNetworks(arrayOf(underlyingNetwork))
+        cfg.routes.forEach { route ->
+            val prefix = Ipv4.parsePrefix(route)
+            builder.addRoute(Ipv4.format(prefix.network), prefix.prefixLength)
+        }
         cfg.dnsServers.forEach(builder::addDnsServer)
         return builder.establish() ?: error("Android rechazó la creación de la interfaz VPN")
+    }
+
+    private fun findUnderlyingNetwork(): Network? {
+        val connectivity = getSystemService(ConnectivityManager::class.java)
+
+        fun usable(network: Network): Boolean {
+            val caps = connectivity.getNetworkCapabilities(network) ?: return false
+            return !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+        }
+
+        connectivity.allNetworks.firstOrNull { network ->
+            val caps = connectivity.getNetworkCapabilities(network)
+            caps != null &&
+                usable(network) &&
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        }?.let { return it }
+
+        connectivity.activeNetwork?.let { if (usable(it)) return it }
+        return connectivity.allNetworks.firstOrNull(::usable)
+    }
+
+    private fun describeNetwork(network: Network): String {
+        val connectivity = getSystemService(ConnectivityManager::class.java)
+        val caps = connectivity.getNetworkCapabilities(network)
+        return when {
+            caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true -> "Wi-Fi"
+            caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true -> "móvil"
+            caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true -> "Ethernet"
+            else -> network.toString()
+        }
     }
 
     private fun tunReadLoop(udp: DatagramSocket, descriptor: ParcelFileDescriptor) {
@@ -122,6 +187,7 @@ class TaltunVpnService : VpnService() {
                 val datagram = DatagramPacket(receiveBuffer, receiveBuffer.size)
                 try { udp.receive(datagram) } catch (_: SocketTimeoutException) { continue }
                 val source = datagram.socketAddress as? InetSocketAddress ?: continue
+                VpnRuntimeState.udpRxPackets.incrementAndGet()
                 val bytes = datagram.data.copyOfRange(datagram.offset, datagram.offset + datagram.length)
                 processUdpPacket(udp, output, source, bytes)
             }
@@ -133,21 +199,24 @@ class TaltunVpnService : VpnService() {
         val now = System.currentTimeMillis(); val localSession = session ?: return
         when (packet[0]) {
             TaltunProtocol.MSG_HANDSHAKE_INIT, TaltunProtocol.MSG_HANDSHAKE_RESP -> {
+                VpnRuntimeState.handshakeRx.incrementAndGet()
                 val handshake = TaltunProtocol.parseHandshake(packet) ?: return
                 val response = if (handshake.type == TaltunProtocol.MSG_HANDSHAKE_INIT) localSession.handleHandshakeInit(handshake, now) else localSession.handleHandshakeResponse(handshake, now)
                 if (response != null) { remoteEndpoint.set(source); sendUdp(udp, response, source) }
                 updateConnectedState(localSession)
             }
             TaltunProtocol.MSG_HANDSHAKE_FINISH -> {
+                VpnRuntimeState.handshakeRx.incrementAndGet()
                 val finish = TaltunProtocol.parseHandshakeFinish(packet) ?: return
                 if (localSession.handleHandshakeFinish(finish, now)) {
                     remoteEndpoint.set(source); localSession.seal(ByteArray(0), now)?.let { sendUdp(udp, it, source) }; updateConnectedState(localSession)
                 }
             }
             TaltunProtocol.MSG_COOKIE_REPLY -> {
+                VpnRuntimeState.handshakeRx.incrementAndGet()
                 if (!sameEndpoint(source, remoteEndpoint.get())) return
                 val cookie = TaltunProtocol.parseCookieReply(packet) ?: return; localSession.setCookie(cookie)
-                if (localSession.needsInitiatorHandshake(now)) sendUdp(udp, localSession.createHandshakeInit(now))
+                if (localSession.needsInitiatorHandshake(now)) sendHandshakePacket(udp, localSession.createHandshakeInit(now))
             }
             TaltunProtocol.MSG_DATA -> {
                 val data = TaltunProtocol.parseData(packet) ?: return; val plaintext = localSession.open(data, now) ?: return
@@ -163,8 +232,8 @@ class TaltunVpnService : VpnService() {
         if (!running.get()) return
         try {
             val localSession = session ?: return; val now = System.currentTimeMillis()
-            localSession.finishRetransmission(now)?.let { sendUdp(udp, it) }
-            if (localSession.needsInitiatorHandshake(now)) { sendUdp(udp, localSession.createHandshakeInit(now)) }
+            localSession.finishRetransmission(now)?.let { sendHandshakePacket(udp, it) }
+            if (localSession.needsInitiatorHandshake(now)) { sendHandshakePacket(udp, localSession.createHandshakeInit(now)) }
             else if (localSession.needsKeepalive(now)) { localSession.seal(ByteArray(0), now)?.let { sendUdp(udp, it) } }
             updateConnectedState(localSession)
         } catch (error: Throwable) { if (running.get()) fail("Mantenimiento: ${error.message}") }
@@ -176,7 +245,24 @@ class TaltunVpnService : VpnService() {
     }
 
     private fun sendUdp(udp: DatagramSocket, data: ByteArray, destination: InetSocketAddress? = remoteEndpoint.get()) {
-        val endpoint = destination ?: return; udp.send(DatagramPacket(data, data.size, endpoint))
+        val endpoint = destination ?: error("Endpoint UDP no configurado")
+        udp.send(DatagramPacket(data, data.size, endpoint))
+        VpnRuntimeState.udpTxPackets.incrementAndGet()
+    }
+
+    private fun sendHandshakePacket(
+        udp: DatagramSocket,
+        data: ByteArray,
+        destination: InetSocketAddress? = remoteEndpoint.get(),
+    ) {
+        sendUdp(udp, data, destination)
+        val attempt = VpnRuntimeState.handshakeTx.incrementAndGet()
+        val target = destination ?: remoteEndpoint.get()
+        val targetText = target?.let { "\${it.address?.hostAddress ?: it.hostString}:\${it.port}" } ?: "?"
+        setState(
+            VpnRuntimeState.Status.CONNECTING,
+            "Handshake TX #$attempt · \${VpnRuntimeState.underlyingNetwork} · \${VpnRuntimeState.udpLocal} → $targetText · RX UDP \${VpnRuntimeState.udpRxPackets.get()}",
+        )
     }
 
     private fun sameEndpoint(a: InetSocketAddress?, b: InetSocketAddress?): Boolean =
@@ -225,6 +311,7 @@ class TaltunVpnService : VpnService() {
         }
         runCatching { scheduler.shutdownNow() }; runCatching { workers.shutdownNow() }; runCatching { socket?.close() }; runCatching { vpnInterface?.close() }
         socket = null; vpnInterface = null; session = null; config = null; remoteEndpoint.set(null)
+        VpnRuntimeState.udpLocal = "—"; VpnRuntimeState.udpRemote = "—"; VpnRuntimeState.underlyingNetwork = "—"
         scheduler = Executors.newSingleThreadScheduledExecutor(); workers = Executors.newFixedThreadPool(2)
         stopForeground(STOP_FOREGROUND_REMOVE)
         if (finalDetail != null) setState(VpnRuntimeState.Status.DISCONNECTED, finalDetail)

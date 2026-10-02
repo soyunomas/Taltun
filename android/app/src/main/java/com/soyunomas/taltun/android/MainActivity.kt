@@ -240,6 +240,7 @@ class MainActivity : Activity() {
             " · RX " + VpnRuntimeState.udpRxPackets.get() +
             " · HS TX " + VpnRuntimeState.handshakeTx.get() +
             " · RX " + VpnRuntimeState.handshakeRx.get() +
+            " · TUN descartados " + VpnRuntimeState.tunDroppedPackets.get() +
             "\nRed " + VpnRuntimeState.underlyingNetwork +
             " · local " + VpnRuntimeState.udpLocal +
             " · remoto " + VpnRuntimeState.udpRemote

@@ -50,10 +50,15 @@ class TaltunVpnService : VpnService() {
                 stopTunnel("Desconectado")
                 stopSelf()
             }
-            ACTION_CONNECT, null -> if (running.compareAndSet(false, true)) {
-                VpnRuntimeState.resetCounters()
-                setState(VpnRuntimeState.Status.CONNECTING, "Preparando túnel")
-                Thread({ startTunnel() }, "taltun-start").start()
+            ACTION_CONNECT, null -> {
+                // A service started with startForegroundService() must promote itself
+                // immediately, before DNS, TUN creation or any other potentially slow I/O.
+                startAsForeground("Taltun", "Preparando túnel…")
+                if (running.compareAndSet(false, true)) {
+                    VpnRuntimeState.resetCounters()
+                    setState(VpnRuntimeState.Status.CONNECTING, "Preparando túnel")
+                    Thread({ startTunnel() }, "taltun-start").start()
+                }
             }
         }
         return Service.START_NOT_STICKY
@@ -77,7 +82,7 @@ class TaltunVpnService : VpnService() {
             val udp = DatagramSocket(null).apply { reuseAddress = false; bind(InetSocketAddress(0)); soTimeout = 1_000 }
             check(protect(udp)) { "Android no pudo proteger el socket UDP del túnel" }
             socket = udp
-            startAsForeground(loaded.profileName)
+            updateForegroundNotification(loaded.profileName, "Negociando sesión v2")
             setState(VpnRuntimeState.Status.CONNECTING, "Negociando sesión v2")
             workers.execute { udpReceiveLoop(udp, descriptor) }
             workers.execute { tunReadLoop(udp, descriptor) }
@@ -181,16 +186,34 @@ class TaltunVpnService : VpnService() {
         if (localSession.hasSession()) setState(VpnRuntimeState.Status.CONNECTED, "Conectado · sesión ${java.lang.Long.toUnsignedString(localSession.currentSessionId(), 16)}")
     }
 
-    private fun startAsForeground(profileName: String) {
+    private fun buildNotification(profileName: String, message: String): Notification {
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "Taltun VPN", NotificationManager.IMPORTANCE_LOW))
         val pendingDisconnect = PendingIntent.getService(this, 2, Intent(this, TaltunVpnService::class.java).setAction(ACTION_DISCONNECT), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         val openApp = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val notification = Notification.Builder(this, CHANNEL_ID).setSmallIcon(R.drawable.ic_taltun).setContentTitle("Taltun · $profileName").setContentText("Túnel VPN activo").setContentIntent(openApp).setOngoing(true).addAction(Notification.Action.Builder(null, "Desconectar", pendingDisconnect).build()).build()
+        return Notification.Builder(this, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_taltun)
+            .setContentTitle("Taltun · $profileName")
+            .setContentText(message)
+            .setContentIntent(openApp)
+            .setOngoing(true)
+            .addAction(Notification.Action.Builder(null, "Desconectar", pendingDisconnect).build())
+            .build()
+    }
+
+    private fun startAsForeground(profileName: String, message: String) {
+        val notification = buildNotification(profileName, message)
         if (Build.VERSION.SDK_INT >= 34) {
             try { startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED) }
             catch (_: SecurityException) { startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE) }
-        } else startForeground(NOTIFICATION_ID, notification)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun updateForegroundNotification(profileName: String, message: String) {
+        getSystemService(NotificationManager::class.java)
+            .notify(NOTIFICATION_ID, buildNotification(profileName, message))
     }
 
     private fun fail(message: String) { setState(VpnRuntimeState.Status.ERROR, message); stopTunnel(null); stopSelf() }

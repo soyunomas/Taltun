@@ -16,6 +16,10 @@
         android:theme="@style/Theme.Taltun">
 
         <activity
+            android:name=".ProfileEditorActivity"
+            android:exported="false" />
+
+        <activity
             android:name=".MainActivity"
             android:exported="true">
             <intent-filter>

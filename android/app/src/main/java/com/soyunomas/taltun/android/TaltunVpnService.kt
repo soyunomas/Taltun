@@ -291,7 +291,7 @@ class TaltunVpnService : VpnService() {
         )
     }
 
-    private fun sameEndpoint    private fun sameEndpoint(a: InetSocketAddress?, b: InetSocketAddress?): Boolean =
+    private fun sameEndpoint(a: InetSocketAddress?, b: InetSocketAddress?): Boolean =
         a != null && b != null && a.port == b.port && a.address == b.address
 
     private fun updateConnectedState(localSession: TaltunSession) {

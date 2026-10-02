@@ -8,7 +8,6 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.VpnService
@@ -16,6 +15,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
+import android.view.ViewGroup
+import android.view.WindowInsets
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.PopupMenu
@@ -46,6 +47,7 @@ class MainActivity : Activity() {
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         store = ConfigStore(this)
+        window.setDecorFitsSystemWindows(false)
         setContentView(buildUi())
         renderProfiles()
 
@@ -77,13 +79,16 @@ class MainActivity : Activity() {
 
     private fun buildUi(): ScrollView {
         val scroll = ScrollView(this).apply {
-            setBackgroundColor(Color.rgb(246, 248, 251))
+            setBackgroundColor(getColor(R.color.taltun_background))
+            clipToPadding = false
+            isFillViewport = true
         }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(20), dp(20), dp(36))
         }
         scroll.addView(root)
+        applySystemBarInsets(scroll, root, 20, 20, 20, 36)
 
         root.addView(TextView(this).apply {
             text = "Taltun"
@@ -93,7 +98,7 @@ class MainActivity : Activity() {
         root.addView(TextView(this).apply {
             text = "Perfiles VPN · protocolo v2"
             textSize = 14f
-            setTextColor(Color.DKGRAY)
+            setTextColor(getColor(R.color.taltun_text_secondary))
             setPadding(0, 0, 0, dp(12))
         })
 
@@ -104,7 +109,7 @@ class MainActivity : Activity() {
         }
         stats = TextView(this).apply {
             textSize = 12f
-            setTextColor(Color.DKGRAY)
+            setTextColor(getColor(R.color.taltun_text_secondary))
             setPadding(dp(14), 0, dp(14), dp(14))
         }
         root.addView(status)
@@ -122,6 +127,8 @@ class MainActivity : Activity() {
         }, LinearLayout.LayoutParams(0, -2, 1f))
         heading.addView(Button(this).apply {
             text = "+ Nuevo"
+            isAllCaps = false
+            minHeight = dp(52)
             setOnClickListener { openEditor(null) }
         })
         root.addView(heading)
@@ -143,7 +150,7 @@ class MainActivity : Activity() {
             profilesContainer.addView(TextView(this).apply {
                 text = "Todavía no hay perfiles. Crea uno para configurar tu primera conexión."
                 textSize = 15f
-                setTextColor(Color.DKGRAY)
+                setTextColor(getColor(R.color.taltun_text_secondary))
                 setPadding(dp(8), dp(24), dp(8), dp(24))
             })
             return
@@ -162,9 +169,9 @@ class MainActivity : Activity() {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(16), dp(14), dp(12), dp(12))
                 background = GradientDrawable().apply {
-                    setColor(Color.WHITE)
+                    setColor(getColor(R.color.taltun_surface))
                     cornerRadius = dp(14).toFloat()
-                    setStroke(dp(1), Color.rgb(220, 224, 230))
+                    setStroke(dp(1), getColor(R.color.taltun_border))
                 }
             }
 
@@ -192,7 +199,7 @@ class MainActivity : Activity() {
                     setTypeface(typeface, Typeface.BOLD)
                     setPadding(dp(8), dp(4), dp(8), dp(4))
                     background = GradientDrawable().apply {
-                        setColor(Color.rgb(235, 238, 243))
+                        setColor(getColor(R.color.taltun_surface_muted))
                         cornerRadius = dp(10).toFloat()
                     }
                 })
@@ -208,7 +215,7 @@ class MainActivity : Activity() {
                 text = config.localVip + " → " + config.peerVip +
                     "   ·   " + if (config.routes.isEmpty()) "sin rutas" else config.routes.joinToString(", ")
                 textSize = 12f
-                setTextColor(Color.DKGRAY)
+                setTextColor(getColor(R.color.taltun_text_secondary))
                 setPadding(0, dp(3), 0, dp(8))
             })
 
@@ -227,23 +234,29 @@ class MainActivity : Activity() {
 
             actions.addView(Button(this).apply {
                 text = if (isRunning) "Desconectar" else "Conectar"
+                isAllCaps = false
+                minHeight = dp(52)
                 isEnabled = isRunning || validationErrors.isEmpty()
                 setOnClickListener {
                     if (isRunning) disconnect() else requestConnect(stored.id)
                 }
-            }, LinearLayout.LayoutParams(0, dp(50), 1f))
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
             actions.addView(Button(this).apply {
                 text = "Editar"
+                isAllCaps = false
+                minHeight = dp(52)
                 setOnClickListener { openEditor(stored.id) }
-            }, LinearLayout.LayoutParams(0, dp(50), 1f))
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
             val more = Button(this).apply {
                 text = "⋮"
+                isAllCaps = false
+                minHeight = dp(52)
                 contentDescription = "Más opciones para " + config.profileName
                 setOnClickListener { showProfileMenu(this, stored.id) }
             }
-            actions.addView(more, LinearLayout.LayoutParams(dp(56), dp(50)))
+            actions.addView(more, LinearLayout.LayoutParams(dp(56), ViewGroup.LayoutParams.WRAP_CONTENT))
             card.addView(actions)
 
             profilesContainer.addView(
@@ -403,6 +416,30 @@ class MainActivity : Activity() {
         value >= 1_000_000L -> String.format("%.2f MB", value / 1_000_000.0)
         value >= 1_000L -> String.format("%.1f KB", value / 1_000.0)
         else -> "$value B"
+    }
+
+
+    private fun applySystemBarInsets(
+        scroll: ScrollView,
+        root: LinearLayout,
+        leftDp: Int,
+        topDp: Int,
+        rightDp: Int,
+        bottomDp: Int,
+    ) {
+        scroll.setOnApplyWindowInsetsListener { _, insets ->
+            val bars = insets.getInsets(
+                WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout(),
+            )
+            root.setPadding(
+                dp(leftDp) + bars.left,
+                dp(topDp) + bars.top,
+                dp(rightDp) + bars.right,
+                dp(bottomDp) + bars.bottom,
+            )
+            insets
+        }
+        scroll.requestApplyInsets()
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()

@@ -7,6 +7,8 @@ object VpnRuntimeState {
 
     @Volatile var status: Status = Status.DISCONNECTED
     @Volatile var detail: String = "Desconectado"
+    @Volatile var activeProfileId: String? = null
+    @Volatile var activeProfileName: String? = null
     val txBytes = AtomicLong(0)
     val rxBytes = AtomicLong(0)
     val udpTxPackets = AtomicLong(0)

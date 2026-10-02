@@ -5,12 +5,13 @@ import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
 import android.text.InputType
 import android.text.method.PasswordTransformationMethod
 import android.view.Gravity
+import android.view.ViewGroup
+import android.view.WindowInsets
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
@@ -47,6 +48,7 @@ class ProfileEditorActivity : Activity() {
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         store = ConfigStore(this)
+        window.setDecorFitsSystemWindows(false)
         profileId = intent.getStringExtra(EXTRA_PROFILE_ID)
 
         val initial = profileId?.let(store::loadProfile) ?: newDefaultConfig()
@@ -70,13 +72,16 @@ class ProfileEditorActivity : Activity() {
 
     private fun buildUi(initial: TaltunConfig): ScrollView {
         val scroll = ScrollView(this).apply {
-            setBackgroundColor(Color.rgb(246, 248, 251))
+            setBackgroundColor(getColor(R.color.taltun_background))
+            clipToPadding = false
+            isFillViewport = true
         }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(20), dp(20), dp(36))
         }
         scroll.addView(root)
+        applySystemBarInsets(scroll, root, 20, 20, 20, 40)
 
         val top = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -111,13 +116,23 @@ class ProfileEditorActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
         }
         keyActions.addView(Button(this).apply {
-            text = "Generar identidad"
+            text = "Generar clave"
+            isAllCaps = false
+            minHeight = dp(56)
+            setSingleLine(true)
             setOnClickListener { confirmGenerateIdentity() }
-        }, LinearLayout.LayoutParams(0, dp(50), 1f))
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            marginEnd = dp(4)
+        })
         keyActions.addView(Button(this).apply {
             text = "Copiar pública"
+            isAllCaps = false
+            minHeight = dp(56)
+            setSingleLine(true)
             setOnClickListener { copyPublicKey() }
-        }, LinearLayout.LayoutParams(0, dp(50), 1f))
+        }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+            marginStart = dp(4)
+        })
         root.addView(keyActions)
 
         root.addView(CheckBox(this).apply {
@@ -158,13 +173,22 @@ class ProfileEditorActivity : Activity() {
 
         root.addView(Button(this).apply {
             text = "Guardar perfil"
+            isAllCaps = false
+            minHeight = dp(56)
             setOnClickListener { saveAndClose() }
-        }, LinearLayout.LayoutParams(-1, dp(54)).apply { topMargin = dp(22) })
+        }, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(22)
+        })
 
         root.addView(Button(this).apply {
             text = "Cancelar"
+            isAllCaps = false
+            minHeight = dp(56)
             setOnClickListener { onBackPressed() }
-        }, LinearLayout.LayoutParams(-1, dp(50)).apply { topMargin = dp(8) })
+        }, LinearLayout.LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            topMargin = dp(8)
+            bottomMargin = dp(8)
+        })
 
         return scroll
     }
@@ -182,7 +206,7 @@ class ProfileEditorActivity : Activity() {
         root.addView(TextView(this).apply {
             text = value
             textSize = 12f
-            setTextColor(Color.DKGRAY)
+            setTextColor(getColor(R.color.taltun_text_secondary))
             setPadding(0, 0, 0, dp(8))
         })
     }
@@ -310,6 +334,30 @@ class ProfileEditorActivity : Activity() {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("Taltun public key", value))
         Toast.makeText(this, "Clave pública copiada", Toast.LENGTH_SHORT).show()
+    }
+
+
+    private fun applySystemBarInsets(
+        scroll: ScrollView,
+        root: LinearLayout,
+        leftDp: Int,
+        topDp: Int,
+        rightDp: Int,
+        bottomDp: Int,
+    ) {
+        scroll.setOnApplyWindowInsetsListener { _, insets ->
+            val bars = insets.getInsets(
+                WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout(),
+            )
+            root.setPadding(
+                dp(leftDp) + bars.left,
+                dp(topDp) + bars.top,
+                dp(rightDp) + bars.right,
+                dp(bottomDp) + bars.bottom,
+            )
+            insets
+        }
+        scroll.requestApplyInsets()
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()

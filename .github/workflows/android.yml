@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -50,3 +50,18 @@ jobs:
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Store APK in repository
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p android/apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk android/apk/Taltun-Android-debug.apk
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f android/apk/Taltun-Android-debug.apk
+          if git diff --cached --quiet; then
+            echo "APK unchanged"
+          else
+            git commit -m "android: publish debug APK [skip ci]"
+            git push origin HEAD:main
+          fi

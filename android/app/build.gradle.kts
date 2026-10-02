@@ -10,8 +10,8 @@ android {
         applicationId = "com.soyunomas.taltun.android"
         minSdk = 33
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.1.3"
+        versionCode = 5
+        versionName = "0.1.4"
         testInstrumentationRunner = "android.app.Instrumentation"
     }
 

@@ -1,6 +1,7 @@
 <resources>
     <color name="taltun_blue">#155EEF</color>
     <color name="taltun_blue_dark">#0B3B91</color>
+    <color name="taltun_icon_background">#081A30</color>
     <color name="taltun_background">#F6F8FB</color>
     <color name="taltun_surface">#FFFFFF</color>
     <color name="taltun_surface_muted">#EBEEF3</color>
